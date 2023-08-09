@@ -17,14 +17,26 @@
 SDL_Window*      window = NULL;
 SDL_Event        window_event;
 
-Uint64           last_frame_time = 0;// Set to current time when difference is bigger than 1/60
-Uint64           timer_total = 0;    // Total game time
+Uint32           last_frame_time = 0;// Set to current time when difference is bigger than 1/60
+Uint32           timer_total = 0;    // Total game time
 int              fps = 60.0;
 float            tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 int              window_scale = 4;
 bool             redraw = true;
 
+
+int EventFilter(void* userdata, SDL_Event* event) {
+    // Process SDL_QUIT event
+    if (event->type == SDL_QUIT 
+        || event->type == SDL_KEYDOWN 
+        || event->type == SDL_MOUSEMOTION) {
+        return 1; // Allow SDL_QUIT event to be processed
+    }
+
+    // Ignore other events
+    return 0; // Ignore the event
+}
 
 int application_init(const char* title) {
     
@@ -48,6 +60,9 @@ int application_init(const char* title) {
         return -1;
     }
 
+    // Set the event filter
+    SDL_SetEventFilter(EventFilter, NULL); // NULL for user data
+
     // Initialize OpenGL stuff
     if (!graphics_init(window))
     {
@@ -68,6 +83,71 @@ int application_init(const char* title) {
     return 0;
 }
 
+
+void application_update() {
+    bool keep_window_open = true;
+    while (keep_window_open) {
+        // Calculate delta time
+        Uint32 current_time = SDL_GetTicks();
+        Uint32 delta = current_time - last_frame_time;
+        if (delta > 100) delta = 100;
+
+        //printf("%d\n", current_time / 1000);
+        
+        // Poll events while queue isn't empty (uses a filter, see EventFilter function)
+        while (SDL_PollEvent(&window_event)) {
+            switch (window_event.type) {
+            case SDL_QUIT:
+                keep_window_open = false;
+                break;
+
+            case SDL_MOUSEMOTION:
+            {
+                int x = window_event.motion.x / window_scale;
+                int y = window_event.motion.y / window_scale;
+                //printf("%d,%d\n", x, y);
+                emu_gpu_set_pixel(x, y, 1);
+                redraw = true;
+            }
+            break;
+            case SDL_KEYDOWN:
+                printf("%c\n", window_event.key.keysym.sym);
+            }
+        }
+        // todo optimization: batch events (like keyboard inputs) together and only after
+        // all events are polled process the inputs.
+
+        // Stalls the program when its running too fast
+        if (tick_rate > delta)
+        {
+            SDL_Delay(tick_rate - delta);
+        }
+
+        ////////////////////////////////////////////
+        // This part of the code executes at ~60 fps
+
+        // Update frame logic
+        timer_total += tick_rate;
+            
+        // Update cpu logic
+        emu_cpu_update();
+
+        // Draw
+        application_draw();
+
+        last_frame_time = current_time;
+    }
+}
+
+void application_draw() {
+    if (!redraw) return; // Only draws when necessary
+
+    graphics_update_rgba_buffer(emu_gpu_get_pixel_buffer());
+    graphics_draw(window);
+
+    redraw = false; // Reset the flag
+}
+
 void application_cleanup() {
     emu_gpu_cleanup();
     graphics_cleanup();
@@ -75,59 +155,4 @@ void application_cleanup() {
     SDL_Quit();
 
 }
-
-void application_update() {
-    bool keep_window_open = true;
-    while (keep_window_open) {
-        // Poll events while queue isn't empty
-        while (SDL_PollEvent(&window_event)) {
-            switch (window_event.type) {
-            case SDL_QUIT:
-                keep_window_open = false;
-                break;
-            
-            case SDL_MOUSEMOTION:
-                {
-                    int x = window_event.motion.x / window_scale;
-                    int y = window_event.motion.y / window_scale;
-                    //printf("%d,%d\n", x, y);
-                    emu_gpu_set_pixel(x, y, 1);
-                    redraw = true;
-                }
-                break;
-            case SDL_KEYDOWN:
-                printf("%c\n", window_event.key.keysym.sym);
-            }
-        }
-
-        // Calculate delta time
-        Uint64 current_time = SDL_GetTicks64();
-        int delta = current_time - last_frame_time;
-
-        // Update frame logic
-        if (delta >= tick_rate) {
-            timer_total += tick_rate;
-            // Update cpu logic
-            emu_cpu_update();
-
-            // Draw
-            application_draw();
-
-            last_frame_time = current_time;
-        }
-    }
-}
-
-void application_draw() {
-    if (!redraw) return;
-
-    //uint8_t* pixel_buffer = emu_gpu_get_pixel_buffer();
-    graphics_update_rgba_buffer(emu_gpu_get_pixel_buffer());
-
-    graphics_draw(window);
-
-    redraw = false; // Reset the flag
-
-}
-
 
