@@ -142,7 +142,6 @@
     <ClInclude Include="include\emu_cpu.h" />
     <ClInclude Include="include\emu_gpu.h" />
     <ClInclude Include="include\graphics.h" />
-    <ClInclude Include="include\logo.h" />
     <ClInclude Include="include\macros.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
