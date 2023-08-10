@@ -208,7 +208,7 @@ int create_rgba_buffer()
     //rgba_buffer = (uint8_t*)malloc(160 * 144 * 4);
     if (rgba_buffer == NULL)
     {
-        printf("Failed to allocate memory for the rgba buffer!\n");
+        fprintf(stderr, "Failed to allocate memory for the rgba buffer!\n");
         return -1;
     }
     return 0;

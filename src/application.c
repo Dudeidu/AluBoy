@@ -14,16 +14,14 @@
 #include "emu_gpu.h"
 
 
-SDL_Window*      window = NULL;
-SDL_Event        window_event;
+SDL_Window* window = NULL;
+SDL_Event   window_event;
 
-Uint32           last_frame_time = 0;// Set to current time when difference is bigger than 1/60
-Uint32           timer_total = 0;    // Total game time
-int              fps = 60.0;
-float            tick_rate = 1000.0 / 60.0; // Milliseconds per frame
+int         fps = 60.0;
+float       tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
-int              window_scale = 4;
-bool             redraw = true;
+int         window_scale = 4;
+bool        redraw = true;
 
 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -43,7 +41,7 @@ int application_init(const char* title) {
     // Initialize SDL Video
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
-        printf("%s\n", SDL_GetError());
+        fprintf(stderr, "%s\n", SDL_GetError());
         return -1;
     }
     // Create the main window
@@ -56,7 +54,7 @@ int application_init(const char* title) {
         SDL_WINDOW_OPENGL);
     if (!window)
     {
-        printf("%s\n", SDL_GetError());
+        fprintf(stderr, "%s\n", SDL_GetError());
         return -1;
     }
 
@@ -71,9 +69,19 @@ int application_init(const char* title) {
         return -1;
     }
 
-    // Initialize emulator gpu
-    if (emu_gpu_create_pixel_buffer() == -1)
+    // Initialize emulator cpu
+    if (emu_cpu_init() == -1)
     {
+        graphics_cleanup();
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
+    // Initialize emulator gpu
+    if (emu_gpu_init() == -1)
+    {
+        emu_cpu_cleanup();
         graphics_cleanup();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -85,15 +93,15 @@ int application_init(const char* title) {
 
 
 void application_update() {
+    
+    Uint32 current_time = 0;
+    Uint32 delta = 0;
+    Uint32 timer_total = 0;    // Total game time
+    Uint32 last_frame_time = SDL_GetTicks();// Set to current time when difference is bigger than 1/60
+
     bool keep_window_open = true;
     while (keep_window_open) {
-        // Calculate delta time
-        Uint32 current_time = SDL_GetTicks();
-        Uint32 delta = current_time - last_frame_time;
-        if (delta > 100) delta = 100;
 
-        //printf("%d\n", current_time / 1000);
-        
         // Poll events while queue isn't empty (uses a filter, see EventFilter function)
         while (SDL_PollEvent(&window_event)) {
             switch (window_event.type) {
@@ -118,13 +126,23 @@ void application_update() {
         // all events are polled process the inputs.
 
         // Stalls the program when its running too fast
+        current_time = SDL_GetTicks();
+        delta = current_time - last_frame_time;
+        if (delta > 100) delta = 100;
+        last_frame_time = current_time;
+
         if (tick_rate > delta)
         {
             SDL_Delay(tick_rate - delta);
+            //printf("under: %d\n", (int)tick_rate - delta);
+        }
+        else
+        {
+            //printf("over: %d\n", delta - (int)tick_rate);
         }
 
         ////////////////////////////////////////////
-        // This part of the code executes at ~60 fps
+        // This part of the code aims to execute at ~60 fps
 
         // Update frame logic
         timer_total += tick_rate;
@@ -149,6 +167,7 @@ void application_draw() {
 }
 
 void application_cleanup() {
+    emu_cpu_cleanup();
     emu_gpu_cleanup();
     graphics_cleanup();
     if (window) SDL_DestroyWindow(window);

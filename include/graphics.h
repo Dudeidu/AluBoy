@@ -13,7 +13,7 @@ do { \
     func; \
     GLenum err = glGetError(); \
     if (err != GL_NO_ERROR) { \
-        printf("OpenGL error after %s: %s\n", #func, gluErrorString(err)); \
+        fprintf(stderr, "OpenGL error after %s: %s\n", #func, gluErrorString(err)); \
     } \
 } while (0)
 

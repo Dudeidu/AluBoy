@@ -14,14 +14,6 @@ int main(void) {
     application_update();   // Runs until window is closed
 
     application_cleanup();  // Free memory stuff
-    
-    /*
-    BytePair row = { .bytes = {0xff, 0x00} };
-    //row.bytes.low = 0
-    printf("full: %04x\n", row.full);
-    printf("high: %02x\n", row.bytes.high);
-    printf("low: %02x\n", row.bytes.low);
-    */
 
-    //return -1;
+    return 0;
 }
