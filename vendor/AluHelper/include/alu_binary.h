@@ -23,8 +23,6 @@ extern "C" {
 #endif
 
 
-#include <stdint.h>
-
 
 #define BIT_MASK(bit)           (1U << (bit))
 #define GET_BIT(value, bit)     (((value) >> (bit)) & 1U)
@@ -32,7 +30,11 @@ extern "C" {
 #define RESET_BIT(value, bit)   ((value) &= ~BIT_MASK(bit))
 #define TOGGLE_BIT(value, bit)  ((value) ^= BIT_MASK(bit))
 
-    extern DLL_EXPORT uint8_t shl(uint8_t x);
+    typedef unsigned char   u8;
+    typedef unsigned short  u16;
+    typedef unsigned int    u32;
+
+    extern DLL_EXPORT u8 shl(u8 x);
 
     /// <summary>
     /// Generic bitfield union.
@@ -49,27 +51,23 @@ extern "C" {
             unsigned char bit6 : 1;
             unsigned char bit7 : 1;
         };
-        uint8_t full;
+        u8 full;
     } BitField;
 
     /// <summary>
     /// A union of 2 bytes, which can be read as a 2 byte value or each byte individually 
     /// </summary>
     typedef union BytePair {
-        uint16_t full; // 16-bit value (2 bytes)
+        u16 full; // 16-bit value (2 bytes)
         struct {
-            uint8_t low;  // Lower 8 bits
-            uint8_t high; // Upper 8 bits
+            u8 low;  // Lower 8 bits
+            u8 high; // Upper 8 bits
         };
     } BytePair;
 
     // msb (most significant bit)   x >> 7
     // lsb (least significant bit)  x & 1
     // get n'th bit from num        bit = num & (n >> 1)
-    /* 2BPP get pixel :
-    *
-    *
-    */
 
 #ifdef __cplusplus  
 }
