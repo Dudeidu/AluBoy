@@ -11,6 +11,6 @@ int main(void) {
     application_update();   // Runs until window is closed
 
     application_cleanup();  // Free memory stuff
-
+    
     return 0;
 }

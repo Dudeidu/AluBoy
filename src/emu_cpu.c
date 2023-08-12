@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "alu_binary.h"
+#include "macros.h"
 
 /// <summary>
 /// Emulates the Game Boy's DMG/CGB-CPU 
@@ -123,12 +124,19 @@ enum RomHeader {
     ROM_SGB_FLAG        = 0x146, // SuperGameBoy(SNES) mode: if 0x03, ignore any command packets
     ROM_CART_TYPE       = 0x147, // what hardware is present
     ROM_ROM_SIZE        = 0x148, // how much ROM is present (32 KiB ª (1 << <value>))
-    ROM_RAM_SIZE        = 0X148, // how much RAM is present, if any. Ignored if CART_TYPE has no RAM
-    ROM_DESTINATION     = 0x149, // 0x00: Japan, 0x0: Global
-    ROM_LICENSEE_OLD    = 0x14A, // the SGB will ignore any command packets unless this value is 0x33
+    ROM_RAM_SIZE        = 0X149, // how much RAM is present, if any. Ignored if CART_TYPE has no RAM
+    ROM_DESTINATION     = 0x14A, // 0x00: Japan, 0x0: Global
+    ROM_LICENSEE_OLD    = 0x14B, // the SGB will ignore any command packets unless this value is 0x33
     ROM_VERSION         = 0X14C, // version number of the game
     ROM_HEADER_CHECKSUM = 0x14D, // 8-bit checksum that gets verified by the boot ROM
-    ROM_GLOBAL_CHECKSUM = 0x104, // 16-bit checksum (not verified)
+    ROM_GLOBAL_CHECKSUM = 0x14E, // 16-bit checksum (not verified)
+};
+enum RTCRegister {
+    RTC_S   = 0x08, // Seconds (0x00-0x3B)
+    RTC_M   = 0x09, // Minutes (0x00-0x3B)
+    RTC_H   = 0x0A, // Hours (0x00-0x17)
+    RTC_DL  = 0x0B, // Lower 8 bits of Day Counter (0x00-0xFF)
+    RTC_DH  = 0x0C, // b0-Upper 1 bit of Day Counter, b6-Halt Flag, b7-Carry Bit
 };
 #define BANKSIZE_ROM    0x4000
 #define BANKSIZE_ERAM   0x2000
@@ -146,7 +154,8 @@ u16 SP; // Stack Pointer
 u16 PC; // Program Counter/Pointer
 
 // Memory-mapped registers
-u8 reg[0x100]; // Refers to Register enum
+u8 reg[0x100];  // Refers to Register enum
+u8 rtc[0xD];    // Refers to RTCRegister enum
 
 // Memory banks
 u8* rom;    // loaded from .gb / .gbc
@@ -154,53 +163,51 @@ u8* eram;   // external ram (cartridge)
 u8 vram[2 * BANKSIZE_VRAM];
 u8 wram[8 * BANKSIZE_ROM];
 u8 oam[0xA0];
-u8 hram[0x7F];
+u8 hram[0x80];
 
-u16 rom_banks; // up to 512 banks of 16 KB each (8MB)
-u8 eram_banks; // up to 16 banks of 8 KB each (128 KB)
+u16 rom_banks;  // up to 512 banks of 16 KB each (8MB)
+u8 eram_banks;  // up to 16 banks of 8 KB each (128 KB)
+u8 mbc_mode;    // For mbc1 only - 0: 2MiB ROM/8KiB RAM | 1: 512KiB ROM/4*8Kib RAM
 
-u16 rom_bank; // current bank
+u16 rom_bank;   // current bank
+u8 rom_bank_2;  // secondary ROM banking register
+
 u8 eram_bank;
-u8 vram_bank;
-u8 wram_bank;
+//u8 vram_bank;
+//u8 wram_bank;
 
 unsigned char title[17]; // 16 + '\0'
 unsigned char licensee_code_new[2];
 u8 licensee_code_old;
+u8 destination_code;
+
 u8 cgb_flag;
 u8 sgb_flag;
 
 u8 cart_type;
+u8 rom_version;
+u8 checksum_header;
+u16 checksum_global;
 
-/*
-TODO - read function that checks which bank is currently read from
-and returns a pointer to the address of that bank.
-example: msb 0~3 is rom0, a - eram, ff8~fff hram, etc...
-*/
+u8 mbc;             // 0: ROM only | 1: MBC1 | 2: MBC2 | 3: MBC3 | 4: MMM01 | 5: MBC5 
+u8 eram_enabled;    // RAM/RTC Enable mbc register
+u8 rtc_select_reg;  // Indicated which RTC register is currently mapped into memory at A000 - BFFF
+                    // any read/write in that range will instead access this register.
+u8 rtc_latch_flag;
+u8 rtc_latch_reg;
 
-u8 read(u16 addr)
-{
-    switch ((u8)(addr << 12))
-    {
-
-    }
-}
+u8 rom_size_code;
+u8 eram_size_code;
 
 
 int emu_cpu_init(u8* rom_buffer)
 {
     // Lookup tables for cart type
     u8 mbc_lut[] = {
-        0, 1, 1, 1, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 3,
+        0, 1, 1, 1, 0, 2, 2, 0, 0, 0, 0, 4, 4, 4, 0, 3,
         3, 3, 3, 3, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5
     };
-    u8 rom_size_lut[] = {
-        [0] = 2,[1] = 4,[2] = 8,[3] = 16,[4] = 32,[5] = 64,[6] = 128,
-        [0x52] = 72,[0x53] = 80,[0x54] = 96
-    };
-    u8 ram_size_lut[] = {
-        1, 1, 4, 16
-    };
+    u8 mbc_lut_size = 31;
 
     rom = rom_buffer;
     // Get ROM header data
@@ -208,17 +215,11 @@ int emu_cpu_init(u8* rom_buffer)
     // Title
     memcpy(title, &rom[ROM_TITLE], sizeof(unsigned char) * 16);
     title[16] = '\0'; // adds a string terminator
-    printf("Title: %s", title);
+    printf("Title: %s\n", title);
 
     // CGB Indicator
     cgb_flag = rom[ROM_CGB_FLAG] == 0x80;
     printf("CGB: %s\n", cgb_flag ? "true" : "false");
-
-    // Licensee code
-    memcpy(title, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
-    printf("Licensee new: %c%c\n", licensee_code_new[0], licensee_code_new[1]);
-    licensee_code_old = rom[ROM_LICENSEE_OLD];
-    printf("Licensee old: %02X\n", licensee_code_old);
 
     // SGB Indicator
     sgb_flag = rom[ROM_SGB_FLAG] == 0x03;
@@ -226,9 +227,48 @@ int emu_cpu_init(u8* rom_buffer)
 
     // Cart type
     cart_type = rom[ROM_CART_TYPE];
+    // MBC type
+    mbc = (cart_type < mbc_lut_size) ? mbc = mbc_lut[cart_type] : 0;
+    // ROM/ERAM banks
+    rom_size_code = rom[ROM_ROM_SIZE];
+    eram_size_code = rom[ROM_RAM_SIZE];
+
+    switch (rom_size_code) {
+        case 0x0:   rom_banks = 2;   break; // 32  kB
+        case 0x1:   rom_banks = 4;   break; // 64  kB
+        case 0x2:   rom_banks = 8;   break; // 128 kB
+        case 0x3:   rom_banks = 16;  break; // 256 kB
+        case 0x4:   rom_banks = 32;  break; // 512 kB
+        case 0x5:   rom_banks = 64;  break; // 1   MB
+        case 0x6:   rom_banks = 128; break; // 2   MB
+        case 0x7:   rom_banks = 256; break; // 4   MB
+        case 0x52:  rom_banks = 72;  break; // 1.1 MB
+        case 0x53:  rom_banks = 80;  break; // 1.2 MB
+        case 0x54:  rom_banks = 96;  break; // 1.5 MB
+        default:    rom_banks = 2;   break;
+    }
+    switch (eram_size_code) {
+        case 0x0:   eram_banks = 0;  break; // none
+        case 0x1:   eram_banks = 1;  break; // 2   kB
+        case 0x2:   eram_banks = 1;  break; // 8   kB
+        case 0x3:   eram_banks = 4;  break; // 32  kB
+        case 0x4:   eram_banks = 16; break; // 128 kB
+        default:    eram_banks = 0;  break;
+    }
+
+    // Licensee code
+    memcpy(title, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
+    printf("Licensee new: %c%c\n", licensee_code_new[0], licensee_code_new[1]);
+    licensee_code_old = rom[ROM_LICENSEE_OLD];
+    printf("Licensee old: %02X\n", licensee_code_old);
+    // Misc
+    destination_code    = rom[ROM_DESTINATION];
+    rom_version         = rom[ROM_VERSION];
+    checksum_header     = rom[ROM_HEADER_CHECKSUM];
+    checksum_global     = rom[ROM_GLOBAL_CHECKSUM] << 8 || rom[ROM_GLOBAL_CHECKSUM + 1];
 
     
-
+    printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n", cart_type, mbc, rom_banks, eram_banks);
 
     //AF.high = GET_BIT(AF.high, 3);
     //RESET_BIT(AF.high, 3);
@@ -249,6 +289,10 @@ int power_up()
     HL.full         = 0x014D;
     PC              = 0x0100;
     SP              = 0xFFFE;
+
+    mbc_mode        = 0;
+    rom_bank        = 0;
+    rom_bank_2      = 0;
     
     reg[REG_P1]     = 0xC7;
     reg[REG_SB]     = 0x00;
@@ -322,6 +366,244 @@ int power_up()
 
     return 0;
 }
+
+
+u8 read(u16 addr)
+{
+    switch ((u8)(addr << 12))
+    {
+
+    }
+}
+
+int write(u16 addr, u8 value)
+{
+    u8 msb = (u8)(addr >> 12);
+    // MBC Registers
+    if (msb < 0x8) {
+        switch (mbc) {
+            case 1:
+            {
+                switch (msb) {
+                    case 0x0:
+                    case 0x1:
+                        // 4 bit register - RAM Enabled
+                        eram_enabled = ((value & 0xF) == 0xA);
+                        break;
+                    case 0x2:
+                    case 0x3:
+                    {
+                        // 5 bit register - ROM bank number
+                        u8 rb = (value & 0x1F);
+                        if (rb < rom_banks) {
+                            rom_bank = (rb == 0) ? 1 : rb; // 0 behaves as 1
+                        }
+                        else {
+                            // Mask the number to the max banks
+                            rom_bank = (rb % rom_banks);
+                        }
+                        // On larger carts which need a >5 bit bank number, 
+                        // the secondary banking register is used to supply an additional 2 bits for the effective bank number
+                        if (rom_banks > 0x1F) {
+                            rom_bank = rom_bank + (rom_bank_2 << 5);
+                            // MMM01 (multi-cart) has a different formula
+                            // These additional two bits are ignored for the bank 00 -> 01 translation
+                        }
+                    } break;
+                    case 0x4:
+                    case 0x5:
+                    {
+                        // 2 bit register - RAM bank number / Upper bits of ROM bank number
+                        if (eram_banks >= 4)        eram_bank = (value & 0x3);
+                        else if (rom_banks >= 64)   rom_bank_2 = (value & 0x3);
+                        // In MMM01 this 2-bit register is instead applied to bits 4-5 
+                        // of the ROM bank number and the top bit of the main 5-bit main ROM banking register is ignored
+                    } break;
+                    case 0x6:
+                    case 0x7:
+                    {
+                        // 1 bit register - Banking mode select
+                        // 00 = Simple Banking Mode (default) 
+                        // 01 = RAM Banking Mode / Advanced ROM Banking Mode
+                        if ((eram_size_code >= 2) && (rom_banks >= 32)) {
+                            mbc_mode = (value & 1);
+                        }
+                    } break;
+                }
+            } break;
+            case 2:
+            {
+                switch (msb) {
+                    case 0x0:
+                    case 0x1:
+                    case 0x2:
+                    case 0x3:
+                    {
+                        // RAM enable  / ROM bank number
+                        if (((addr >> 8) & 1) == 0) {
+                            eram_enabled = (value == 0xA);
+                        }
+                        else {
+                            rom_bank = (value & 0xF);
+                            if (rom_bank == 0) rom_bank = 1;
+                        }
+                    } break;
+                }
+            } break;
+            case 3:
+            {
+                switch ((u8)(addr >> 12)) {
+                    case 0x0:
+                    case 0x1:
+                    {
+                        // RAM and Timer enable
+                        eram_enabled = ((value & 0xF) == 0xA);
+                    } break;
+                    case 0x2:
+                    case 0x3:
+                    {
+                        // 7 bit register - ROM bank number
+                        u8 rb = (value & 0x7F);
+                        if (rb < rom_banks) {
+                            rom_bank = (rb == 0) ? 1 : rb; // 0 behaves as 1
+                        }
+                        else {
+                            // Mask the number to the max banks
+                            rom_bank = (rb % rom_banks);
+                        }
+                    } break;
+                    case 0x4:
+                    case 0x5:
+                    {
+                        // RAM bank number / RTC register select
+                        if (value <= 0x03) {
+                            if (eram_banks >= 4) eram_bank = (value & 0x3);
+                            rtc_select_reg = 0;
+                        }
+                        else if (value >= 0x08 && value <= 0x0C) {
+                            rtc_select_reg = value;
+                        }
+                    } break;
+                    case 0x6:
+                    case 0x7:
+                    {
+                        // Latch Clock Data
+                        // When writing 0x00, and then 0x01 to this register, 
+                        // the current time becomes latched into the RTC registers. 
+                        // The latched data will not change until it becomes latched again, by repeating the procedure.
+                        if ((rtc_latch_reg == value) && (value <= 0x01)) {
+                            rtc_latch_reg++;
+                            if (rtc_latch_reg == 2) {
+                                rtc_latch_reg = 0;
+                                rtc_latch_flag = !rtc_latch_flag;
+                                // TODO: Latch the current time into the rtc registers...
+                                if (rtc_latch_flag) {
+
+                                }
+                            }
+                        }
+                    } break;
+                }
+            } break;
+            case 5:
+            {
+                switch ((u8)(addr >> 12)) {
+                    case 0x0:
+                    case 0x1:
+                    {
+                        // RAM enable
+                        eram_enabled = ((value & 0xF) == 0xA);
+                    } break;
+                    case 0x2:
+                    {
+                        // 8 bit register - ROM bank number
+                        if (value < rom_banks) {
+                            rom_bank = value;
+                        }
+                        else {
+                            // Mask the number to the max banks
+                            rom_bank = (value % rom_banks);
+                        }
+                        // On larger carts which need a >8 bit bank number, 
+                        // the secondary banking register is used to supply an additional 1 bits for the effective bank number
+                        if (rom_banks > 0xFF) {
+                            rom_bank = (rom_bank + (rom_bank_2 << 8));
+                        }
+                    } break;
+                    case 0x3:
+                    {
+                        // 9th bit of ROM bank number
+                        rom_bank_2 = (value & 1);
+                    } break;
+                    case 0x4:
+                    case 0x5:
+                    {
+                        // RAM bank number
+                        if (eram_banks >= value & 0xF) eram_bank = (value & 0xF);
+                    } break;
+                }
+            } break;
+        }
+    }
+    else {
+        switch (msb) {
+            case 0x8:
+            case 0x9:
+                // VRAM
+                if (cgb_flag)   vram[(addr & 0x1FF) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
+                else            vram[addr & 0x1FF] = value;
+                break;
+            case 0xA:
+            case 0xB:
+                // ERAM
+                if (!eram_enabled) return -1;
+                if (mbc == 2) {
+                    // Half bytes, Bottom 9 bits of address are used to index RAM
+                    eram[addr & 0x1FF] = (value & 0xF);
+                }
+                else if (mbc == 3 && rtc_select_reg > 0) {
+                    // RTC register write
+                    rtc[rtc_select_reg] = value; 
+                }
+                else {
+                    // "& 0x1FF" extracts the lower 13 bits, which maps the address to the array range starting from 0x0
+                    eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)] = value;
+                }
+                break;
+            case 0xC:
+            case 0xE:
+                // WRAM / ECHO RAM
+                wram[addr & 0xFFF] = value;
+                break;
+            case 0xD:
+            case 0xF:
+                // WRAM Bank / ECHO RAM
+                if (addr < MEM_OAM) {
+                    if (cgb_flag)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
+                    else            wram[addr & 0x1FFF] = value;
+                }
+                // Object attribute memory (OAM)
+                else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
+                    oam[addr - MEM_OAM] = value; // Convert to range 0-159
+                }
+                // I/O Registers
+                else if (addr >= MEM_IO && addr < MEM_HRAM) {
+                    reg[addr & 0xFF] = value;   // Convert to range 0-255
+                }
+                // High RAM
+                else if (addr >= MEM_HRAM && addr < MEM_IE) {
+                    hram[addr & 0x7F] = value;  // Convert to range 0-127
+                }
+                // Interrupt Enable register (IE)
+                else {
+                    reg[REG_IE] = value;
+                }
+        }
+    }
+    return 0;
+}
+
+
 
 void emu_cpu_update()
 {

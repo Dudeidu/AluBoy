@@ -18,16 +18,16 @@
     <ClCompile Include="src\graphics.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\main.c">
+    <ClCompile Include="src\emu_gpu.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\emu_gpu.c">
+    <ClCompile Include="src\application.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\emu_cpu.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\application.c">
+    <ClCompile Include="src\main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
