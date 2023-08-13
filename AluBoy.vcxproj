@@ -142,6 +142,7 @@
   <ItemGroup>
     <ClInclude Include="include\application.h" />
     <ClInclude Include="include\emu_cpu.h" />
+    <ClInclude Include="include\emu_cpu_helper.h" />
     <ClInclude Include="include\emu_gpu.h" />
     <ClInclude Include="include\graphics.h" />
     <ClInclude Include="include\macros.h" />

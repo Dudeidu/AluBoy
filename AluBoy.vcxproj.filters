@@ -47,5 +47,8 @@
     <ClInclude Include="include\macros.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\emu_cpu_helper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
