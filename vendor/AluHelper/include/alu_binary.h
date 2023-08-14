@@ -39,6 +39,7 @@ extern "C" {
 #define HALF_CARRY_U16_ADD(a, b)    ((((a) & 0xFFF) + ((b) & 0xFFF)) & 0x1000 == 0x1000)
 #define HALF_CARRY_U16_SUB(a, b)    (((int)((a) & 0xFFF) - (int)((b) & 0xFFF)) & 0x1000 == 0x1000)
 
+    typedef char            s8;
     typedef unsigned char   u8;
     typedef unsigned short  u16;
     typedef unsigned int    u32;
