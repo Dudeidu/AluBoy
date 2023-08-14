@@ -644,9 +644,8 @@ u8 execute_instruction(u8 op) {
                 F_H = 0;
                 break;
             case 0x08: // LD (a16),SP
-                write(PC++, SP.high);
                 write(PC++, SP.low);
-                PC += 2;
+                write(PC++, SP.high);
                 break;
             case 0x09: // ADD HL,BC
                 add_u16(&HL.full, BC.full);
@@ -1353,6 +1352,252 @@ u8 execute_instruction(u8 op) {
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
                 PC = 0x0008;
+                break;
+
+            case 0xD0: // RET NC
+                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                t_u16.low = read(SP.full++);
+                t_u16.high = read(SP.full++);
+                if (!F_C) {
+                    PC = t_u16.full;
+                    cycles += 12;
+                }
+                break;
+            case 0xD1: // POP DE
+                DE.low = read(SP.full++);
+                DE.high = read(SP.full++);
+                break;
+            case 0xD2: // JP NC,a16
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
+                if (!F_C) {
+                    PC = t_u16.full;
+                    cycles += 4;
+                }
+                break;
+            case 0xD3:
+                // nothing here
+                break;
+            case 0xD4: // CALL NC,a16
+                t_u16.high = read(--SP.full);
+                t_u16.low = read(--SP.full);
+                if (!F_C) {
+                    PC = t_u16.full;
+                    cycles += 12;
+                }
+                break;
+            case 0xD5: // PUSH DE
+                write(--SP.full, DE.high);
+                write(--SP.full, DE.low);
+                break;
+            case 0xD6: // SUB d8
+                sub_u8(read(PC++));
+                break;
+            case 0xD7: // RST 10H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0010;
+                break;
+            case 0xD8: // RET C
+                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                t_u16.low = read(SP.full++);
+                t_u16.high = read(SP.full++);
+                if (F_C) {
+                    PC = t_u16.full;
+                    cycles += 12;
+                }
+                break;
+            case 0xD9: // RETI
+                t_u16.low = read(SP.full++);
+                t_u16.high = read(SP.full++);
+                PC = t_u16.full;
+                reg[REG_IE] = 1;
+                break;
+            case 0xDA: // JP C,a16
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
+                if (F_C) {
+                    PC = t_u16.full;
+                    cycles += 4;
+                }
+                break;
+            case 0xDB:
+                // nothing here
+                break;
+            case 0xDC: // CALL C,a16
+                t_u16.high = read(--SP.full);
+                t_u16.low = read(--SP.full);
+                if (F_C) {
+                    PC = t_u16.full;
+                    cycles += 12;
+                }
+                break;
+            case 0xDD:
+                // nothing here
+                break;
+            case 0xDE: // SBC A,d8
+                sub_u8(read(PC++) - F_C);
+                break;
+            case 0xDF: // RST 18H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0018;
+                break;
+
+            case 0xE0: // LDH (a8),A
+                // Put A into memory address 0xFF00+n (IO)
+                write(MEM_IO + read(PC++), A);
+                break;
+            case 0xE1: // POP HL
+                HL.low = read(SP.full++);
+                HL.high = read(SP.full++);
+                break;
+            case 0xE2: // LD (C),A
+                // Put A into memory address 0xFF00+C (IO)
+                write(MEM_IO + BC.low, A);
+                break;
+            case 0xE3:
+                // nothing here
+                break;
+            case 0xE4:
+                // nothing here
+                break;
+            case 0xE5: // PUSH HL
+                write(--SP.full, HL.high);
+                write(--SP.full, HL.low);
+                break;
+            case 0xE6: // AND d8
+                and_u8(read(PC++));
+                break;
+            case 0xE7: // RST 20H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0020;
+                break;
+            case 0xE8: // ADD SP,r8
+                //add_u8(&SP.full, read(PC++));
+                t_s8 = (s8)read(PC++);
+                if (t_s8 >= 0) {
+                    F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
+                    F_C = CARRY_ADD(SP.full, t_s8);
+                }
+                else {
+                    F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
+                    F_C = CARRY_SUB(SP.full, t_s8);
+                }
+                F_N = 0;
+                F_Z = 0;
+                SP.full += t_s8;
+                break;
+            case 0xE9: // JP (HL)
+                PC = HL.full;
+                break;
+            case 0xEA: // LD (a16),A
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
+                write(t_u16.full, A);
+                break;
+            case 0xEB:
+                // nothing here
+                break;
+            case 0xEC:
+                // nothing here
+                break;
+            case 0xED:
+                // nothing here
+                break;
+            case 0xEE: // XOR d8
+                xor_u8(read(PC++));
+                break;
+            case 0xEF: // RST 28H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0028;
+                break;
+
+            case 0xF0: // LDH A,(a8)
+                // Put value in memory address 0xFF00+n into A
+                t_u8 = read(PC++);
+                A = read(MEM_IO + t_u8);
+                break;
+            case 0xF1: // POP AF
+                t_u8 = read(SP.full++);
+                F_C = GET_BIT(t_u8, 4);
+                F_H = GET_BIT(t_u8, 5);
+                F_N = GET_BIT(t_u8, 6);
+                F_Z = GET_BIT(t_u8, 7);
+                A = read(SP.full++);
+                break;
+            case 0xF2: // LD A,(C)
+                // Put value in memory address 0xFF00+C into A
+                A = read(MEM_IO + BC.low);
+                break;
+            case 0xF3: // DI
+                reg[REG_IE] = 0;
+                break;
+            case 0xF4:
+                // nothing here
+                break;
+            case 0xF5: // PUSH AF
+                write(--SP.full, A);
+                // reconstruct the F register
+                t_u8 = 0;
+                t_u8 |= ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4));
+                write(--SP.full, t_u8);
+                break;
+            case 0xF6: // OR d8
+                or_u8(read(PC++));
+                break;
+            case 0xF7: // RST 30H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0030;
+                break;
+            case 0xF8: // LD HL,SP+r8
+                t_s8 = (s8)read(PC++);
+                t_u16.full = SP.full;
+                if (t_s8 >= 0) {
+                    F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
+                    F_C = CARRY_ADD(SP.full, t_s8);
+                }
+                else {
+                    F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
+                    F_C = CARRY_SUB(SP.full, t_s8);
+                }
+                F_N = 0;
+                F_Z = 0;
+                HL.full = (SP.full + t_s8);
+                break;
+            case 0xF9: // LD SP,HL
+                SP.full = HL.full;
+                break;
+            case 0xFA: // LD A,(a16)
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
+                A = read(t_u16.full);
+                break;
+            case 0xFB: // EI
+                reg[REG_IE] = 1;
+                break;
+            case 0xFC:
+                // nothing here
+                break;
+            case 0xFD:
+                // nothing here
+                break;
+            case 0xFE: // CP d8
+                cp_u8(read(PC++));
+                break;
+            case 0xFF: // RST 38H
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                PC = 0x0038;
                 break;
         }
     }
