@@ -66,6 +66,7 @@ u8 rtc_latch_flag;
 u8 rtc_latch_reg;
 u8 rtc_select_reg;  // Indicated which RTC register is currently mapped into memory at A000 - BFFF
 
+// Arithmetic
 void inc_u8(u8* a) {
     F_H = HALF_CARRY_U8_ADD(*a, 1);
     F_N = 0;
@@ -125,6 +126,86 @@ void or_u8(u8 b) {
     F_N = 0;
     A |= b;
     F_Z = (A == 0);
+}
+// Rotates & Shifts 
+void rlc(u8* a) {
+    F_C = GET_BIT(*a, 7);
+    *a = ROTATE_LEFT(*a, 1, 8);
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void rrc(u8* a) {
+    F_C = GET_BIT(*a, 0);
+    *a = ROTATE_RIGHT(*a, 1, 8);
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void rl(u8* a) {
+    u8 temp = F_C;
+    F_C = GET_BIT(A, 7);
+    *a = (*a << 1) & 0xFF;
+    if (temp) SET_BIT(*a, 0);
+
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void rr(u8* a) {
+    u8 temp = F_C;
+    F_C = GET_BIT(A, 0);
+    *a = (*a >> 1) & 0xFF;
+    if (temp) SET_BIT(*a, 7);
+
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void sla(u8* a) {
+    // left shift into carry, conserving the msb
+    F_C = GET_BIT(A, 7);
+    *a = (*a << 1) & 0xFF;
+
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void sra(u8* a) {
+    // right shift into carry, conserving the msb
+    u8 temp = GET_BIT(*a, 7);
+    F_C = GET_BIT(*a, 0);
+    *a = (*a >> 1) & 0xFF;
+    // restore msb
+    if (temp)   SET_BIT(*a, 7);
+    else        RESET_BIT(*a, 7);
+
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void srl(u8* a) {
+    // right shift into carry, msb set to 0
+    F_C = GET_BIT(*a, 0);
+    *a = (*a >> 1) & 0xFF;
+    // msb set to 0
+    SET_BIT(*a, 7);
+
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+}
+void swap(u8* a) {
+    *a = ((*a & 0xF) << 4) | (*a >> 4);
+    F_Z = (*a == 0);
+    F_N = 0;
+    F_H = 0;
+    F_C = 0;
+}
+void test_bit(u8* a, u8 b) {
+    F_Z = GET_BIT(*a, b);
+    F_N = 0;
+    F_H = 1;
 }
 
 int power_up()
@@ -1604,6 +1685,825 @@ u8 execute_instruction(u8 op) {
     // Prefix CB
     else {
         prefix_cb = 0;
+        switch (op)
+        {
+            case 0x00: // RLC B
+                rlc(&BC.high);
+                break;
+            case 0x01: // RLC C
+                rlc(&BC.low);
+                break;
+            case 0x02: // RLC D
+                rlc(&DE.high);
+                break;
+            case 0x03: // RLC E
+                rlc(&DE.low);
+                break;
+            case 0x04: // RLC H
+                rlc(&HL.high);
+                break;
+            case 0x05: // RLC L
+                rlc(&HL.low);
+                break;
+            case 0x06: // RLC (HL)
+                t_u8 = read(HL.full);
+                rlc(&t_u8);
+                break;
+            case 0x07: // RLC A
+                rlc(&A);
+                break;
+            case 0x08: // RRC B
+                rrc(&BC.high);
+                break;
+            case 0x09: // RRC C
+                rrc(&BC.low);
+                break;
+            case 0x0A: // RRC D
+                rrc(&DE.high);
+                break;
+            case 0x0B: // RRC E
+                rrc(&DE.low);
+                break;
+            case 0x0C: // RRC H
+                rrc(&HL.high);
+                break;
+            case 0x0D: // RRC L
+                rrc(&HL.low);
+                break;
+            case 0x0E: // RRC (HL)
+                t_u8 = read(HL.full);
+                rrc(&t_u8);
+                break;
+            case 0x0F: // RRC A
+                rrc(&A);
+                break;
+            case 0x10: // RL B
+                rl(&BC.high);
+                break;
+            case 0x11: // RL C
+                rl(&BC.low);
+                break;
+            case 0x12: // RL D
+                rl(&DE.high);
+                break;
+            case 0x13: // RL E
+                rl(&DE.low);
+                break;
+            case 0x14: // RL H
+                rl(&HL.high);
+                break;
+            case 0x15: // RL L
+                rl(&HL.low);
+                break;
+            case 0x16: // RL (HL)
+                t_u8 = read(HL.full);
+                rl(&t_u8);
+                break;
+            case 0x17: // RL A
+                rl(&A);
+                break;
+            case 0x18: // RR B
+                rr(&BC.high);
+                break;
+            case 0x19: // RR C
+                rr(&BC.low);
+                break;
+            case 0x1A: // RR D
+                rr(&DE.high);
+                break;
+            case 0x1B: // RR E
+                rr(&DE.low);
+                break;
+            case 0x1C: // RR H
+                rr(&HL.high);
+                break;
+            case 0x1D: // RR L
+                rr(&HL.low);
+                break;
+            case 0x1E: // RR (HL)
+                t_u8 = read(HL.full);
+                rr(&t_u8);
+                break;
+            case 0x1F: // RR A
+                rr(&A);
+                break;
+            case 0x20: // SLA B
+                sla(&BC.high);
+                break;
+            case 0x21: // SLA C
+                sla(&BC.low);
+                break;
+            case 0x22: // SLA D
+                sla(&DE.high);
+                break;
+            case 0x23: // SLA E
+                sla(&DE.low);
+                break;
+            case 0x24: // SLA H
+                sla(&HL.high);
+                break;
+            case 0x25: // SLA L
+                sla(&HL.low);
+                break;
+            case 0x26: // SLA (HL)
+                t_u8 = read(HL.full);
+                sla(&t_u8);
+                break;
+            case 0x27: // SLA A
+                sla(&A);
+                break;
+            case 0x28: // SRA B
+                sra(&BC.high);
+                break;
+            case 0x29: // SRA C
+                sra(&BC.low);
+                break;
+            case 0x2A: // SRA D
+                sra(&DE.high);
+                break;
+            case 0x2B: // SRA E
+                sra(&DE.low);
+                break;
+            case 0x2C: // SRA H
+                sra(&HL.high);
+                break;
+            case 0x2D: // SRA L
+                sra(&HL.low);
+                break;
+            case 0x2E: // SRA (HL)
+                t_u8 = read(HL.full);
+                sra(&t_u8);
+                break;
+            case 0x2F: // SRA A
+                sra(&A);
+                break;
+            case 0x30: // SWAP B
+                swap(&BC.high);
+                break;
+            case 0x31: // SWAP C
+                swap(&BC.low);
+                break;
+            case 0x32: // SWAP D
+                swap(&DE.high);
+                break;
+            case 0x33: // SWAP E
+                swap(&DE.low);
+                break;
+            case 0x34: // SWAP H
+                swap(&HL.high);
+                break;
+            case 0x35: // SWAP L
+                swap(&HL.low);
+                break;
+            case 0x36: // SWAP (HL)
+                t_u8 = read(HL.full);
+                swap(&t_u8);
+                break;
+            case 0x37: // SWAP A
+                swap(&A);
+                break;
+            case 0x38: // SRL B
+                srl(&BC.high);
+                break;
+            case 0x39: // SRL C
+                srl(&BC.low);
+                break;
+            case 0x3A: // SRL D
+                srl(&DE.high);
+                break;
+            case 0x3B: // SRL E
+                srl(&DE.low);
+                break;
+            case 0x3C: // SRL H
+                srl(&HL.high);
+                break;
+            case 0x3D: // SRL L
+                srl(&HL.low);
+                break;
+            case 0x3E: // SRL (HL)
+                t_u8 = read(HL.full);
+                srl(&t_u8);
+                break;
+            case 0x3F: // SRL A
+                srl(&A);
+                break;
+            case 0x40: // BIT 0,B
+                test_bit(&BC.high, 0);
+                break;
+            case 0x41: // BIT 0,C
+                test_bit(&BC.low, 0);
+                break;
+            case 0x42: // BIT 0,D
+                test_bit(&DE.high, 0);
+                break;
+            case 0x43: // BIT 0,E
+                test_bit(&DE.low, 0);
+                break;
+            case 0x44: // BIT 0,H
+                test_bit(&HL.high, 0);
+                break;
+            case 0x45: // BIT 0,L
+                test_bit(&HL.low, 0);
+                break;
+            case 0x46: // BIT 0,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 0);
+                break;
+            case 0x47: // BIT 0,A
+                test_bit(&A, 0);
+                break;
+            case 0x48: // BIT 1,B
+                test_bit(&BC.high, 1);
+                break;
+            case 0x49: // BIT 1,C
+                test_bit(&BC.low, 1);
+                break;
+            case 0x4A: // BIT 1,D
+                test_bit(&DE.high, 1);
+                break;
+            case 0x4B: // BIT 1,E
+                test_bit(&DE.low, 1);
+                break;
+            case 0x4C: // BIT 1,H
+                test_bit(&HL.high, 1);
+                break;
+            case 0x4D: // BIT 1,L
+                test_bit(&HL.low, 1);
+                break;
+            case 0x4E: // BIT 1,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 1);
+                break;
+            case 0x4F: // BIT 1,A
+                test_bit(&A, 1);
+                break;
+            case 0x50: // BIT 2,B
+                test_bit(&BC.high, 2);
+                break;
+            case 0x51: // BIT 2,C
+                test_bit(&BC.low, 2);
+                break;
+            case 0x52: // BIT 2,D
+                test_bit(&DE.high, 2);
+                break;
+            case 0x53: // BIT 2,E
+                test_bit(&DE.low, 2);
+                break;
+            case 0x54: // BIT 2,H
+                test_bit(&HL.high, 2);
+                break;
+            case 0x55: // BIT 2,L
+                test_bit(&HL.low, 2);
+                break;
+            case 0x56: // BIT 2,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 2);
+                break;
+            case 0x57: // BIT 2,A
+                test_bit(&A, 2);
+                break;
+            case 0x58: // BIT 3,B
+                test_bit(&BC.high, 3);
+                break;
+            case 0x59: // BIT 3,C
+                test_bit(&BC.low, 3);
+                break;
+            case 0x5A: // BIT 3,D
+                test_bit(&DE.high, 3);
+                break;
+            case 0x5B: // BIT 3,E
+                test_bit(&DE.low, 3);
+                break;
+            case 0x5C: // BIT 3,H
+                test_bit(&HL.high, 3);
+                break;
+            case 0x5D: // BIT 3,L
+                test_bit(&HL.low, 3);
+                break;
+            case 0x5E: // BIT 3,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 3);
+                break;
+            case 0x5F: // BIT 3,A
+                test_bit(&A, 3);
+                break;
+            case 0x60: // BIT 4,B
+                test_bit(&BC.high, 4);
+                break;
+            case 0x61: // BIT 4,C
+                test_bit(&BC.low, 4);
+                break;
+            case 0x62: // BIT 4,D
+                test_bit(&DE.high, 4);
+                break;
+            case 0x63: // BIT 4,E
+                test_bit(&DE.low, 4);
+                break;
+            case 0x64: // BIT 4,H
+                test_bit(&HL.high, 4);
+                break;
+            case 0x65: // BIT 4,L
+                test_bit(&HL.low, 4);
+                break;
+            case 0x66: // BIT 4,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 4);
+                break;
+            case 0x67: // BIT 4,A
+                test_bit(&A, 4);
+                break;
+            case 0x68: // BIT 5,B
+                test_bit(&BC.high, 5);
+                break;
+            case 0x69: // BIT 5,C
+                test_bit(&BC.low, 5);
+                break;
+            case 0x6A: // BIT 5,D
+                test_bit(&DE.high, 5);
+                break;
+            case 0x6B: // BIT 5,E
+                test_bit(&DE.low, 5);
+                break;
+            case 0x6C: // BIT 5,H
+                test_bit(&HL.high, 5);
+                break;
+            case 0x6D: // BIT 5,L
+                test_bit(&HL.low, 5);
+                break;
+            case 0x6E: // BIT 5,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 5);
+                break;
+            case 0x6F: // BIT 5,A
+                test_bit(&A, 5);
+                break;
+            case 0x70: // BIT 6,B
+                test_bit(&BC.high, 6);
+                break;
+            case 0x71: // BIT 6,C
+                test_bit(&BC.low, 6);
+                break;
+            case 0x72: // BIT 6,D
+                test_bit(&DE.high, 6);
+                break;
+            case 0x73: // BIT 6,E
+                test_bit(&DE.low, 6);
+                break;
+            case 0x74: // BIT 6,H
+                test_bit(&HL.high, 6);
+                break;
+            case 0x75: // BIT 6,L
+                test_bit(&HL.low, 6);
+                break;
+            case 0x76: // BIT 6,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 6);
+                break;
+            case 0x77: // BIT 6,A
+                test_bit(&A, 6);
+                break;
+            case 0x78: // BIT 7,B
+                test_bit(&BC.high, 7);
+                break;
+            case 0x79: // BIT 7,C
+                test_bit(&BC.low, 7);
+                break;
+            case 0x7A: // BIT 7,D
+                test_bit(&DE.high, 7);
+                break;
+            case 0x7B: // BIT 7,E
+                test_bit(&DE.low, 7);
+                break;
+            case 0x7C: // BIT 7,H
+                test_bit(&HL.high, 7);
+                break;
+            case 0x7D: // BIT 7,L
+                test_bit(&HL.low, 7);
+                break;
+            case 0x7E: // BIT 7,(HL)
+                t_u8 = read(HL.full);
+                test_bit(&t_u8, 7);
+                break;
+            case 0x7F: // BIT 7,A
+                test_bit(&A, 7);
+                break;
+            case 0x80: // RES 0,B
+                RESET_BIT(BC.high, 0);
+                break;
+            case 0x81: // RES 0,C
+                RESET_BIT(BC.low, 0);
+                break;
+            case 0x82: // RES 0,D
+                RESET_BIT(DE.high, 0);
+                break;
+            case 0x83: // RES 0,E
+                RESET_BIT(DE.low, 0);
+                break;
+            case 0x84: // RES 0,H
+                RESET_BIT(HL.high, 0);
+                break;
+            case 0x85: // RES 0,L
+                RESET_BIT(HL.low, 0);
+                break;
+            case 0x86: // RES 0,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 0);
+                write(HL.full, t_u8);
+                break;
+            case 0x87: // RES 0,A
+                RESET_BIT(A, 0);
+                break;
+            case 0x88: // RES 1,B
+                RESET_BIT(BC.high, 1);
+                break;
+            case 0x89: // RES 1,C
+                RESET_BIT(BC.low, 1);
+                break;
+            case 0x8A: // RES 1,D
+                RESET_BIT(DE.high, 1);
+                break;
+            case 0x8B: // RES 1,E
+                RESET_BIT(DE.low, 1);
+                break;
+            case 0x8C: // RES 1,H
+                RESET_BIT(HL.high, 1);
+                break;
+            case 0x8D: // RES 1,L
+                RESET_BIT(HL.low, 1);
+                break;
+            case 0x8E: // RES 1,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 1);
+                write(HL.full, t_u8);
+                break;
+            case 0x8F: // RES 1,A
+                RESET_BIT(A, 1);
+                break;
+            case 0x90: // RES 2,B
+                RESET_BIT(BC.high, 2);
+                break;
+            case 0x91: // RES 2,C
+                RESET_BIT(BC.low, 2);
+                break;
+            case 0x92: // RES 2,D
+                RESET_BIT(DE.high, 2);
+                break;
+            case 0x93: // RES 2,E
+                RESET_BIT(DE.low, 2);
+                break;
+            case 0x94: // RES 2,H
+                RESET_BIT(HL.high, 2);
+                break;
+            case 0x95: // RES 2,L
+                RESET_BIT(HL.low, 2);
+                break;
+            case 0x96: // RES 2,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 2);
+                write(HL.full, t_u8);
+                break;
+            case 0x97: // RES 2,A
+                RESET_BIT(A, 2);
+                break;
+            case 0x98: // RES 3,B
+                RESET_BIT(BC.high, 3);
+                break;
+            case 0x99: // RES 3,C
+                RESET_BIT(BC.low, 3);
+                break;
+            case 0x9A: // RES 3,D
+                RESET_BIT(DE.high, 3);
+                break;
+            case 0x9B: // RES 3,E
+                RESET_BIT(DE.low, 3);
+                break;
+            case 0x9C: // RES 3,H
+                RESET_BIT(HL.high, 3);
+                break;
+            case 0x9D: // RES 3,L
+                RESET_BIT(HL.low, 3);
+                break;
+            case 0x9E: // RES 3,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 3);
+                write(HL.full, t_u8);
+                break;
+            case 0x9F: // RES 3,A
+                RESET_BIT(A, 3);
+                break;
+            case 0xA0: // RES 4,B
+                RESET_BIT(BC.high, 4);
+                break;
+            case 0xA1: // RES 4,C
+                RESET_BIT(BC.low, 4);
+                break;
+            case 0xA2: // RES 4,D
+                RESET_BIT(DE.high, 4);
+                break;
+            case 0xA3: // RES 4,E
+                RESET_BIT(DE.low, 4);
+                break;
+            case 0xA4: // RES 4,H
+                RESET_BIT(HL.high, 4);
+                break;
+            case 0xA5: // RES 4,L
+                RESET_BIT(HL.low, 4);
+                break;
+            case 0xA6: // RES 4,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 4);
+                write(HL.full, t_u8);
+                break;
+            case 0xA7: // RES 4,A
+                RESET_BIT(A, 4);
+                break;
+            case 0xA8: // RES 5,B
+                RESET_BIT(BC.high, 5);
+                break;
+            case 0xA9: // RES 5,C
+                RESET_BIT(BC.low, 5);
+                break;
+            case 0xAA: // RES 5,D
+                RESET_BIT(DE.high, 5);
+                break;
+            case 0xAB: // RES 5,E
+                RESET_BIT(DE.low, 5);
+                break;
+            case 0xAC: // RES 5,H
+                RESET_BIT(HL.high, 5);
+                break;
+            case 0xAD: // RES 5,L
+                RESET_BIT(HL.low, 5);
+                break;
+            case 0xAE: // RES 5,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 5);
+                write(HL.full, t_u8);
+                break;
+            case 0xAF: // RES 5,A
+                RESET_BIT(A, 5);
+                break;
+            case 0xB0: // RES 6,B
+                RESET_BIT(BC.high, 6);
+                break;
+            case 0xB1: // RES 6,C
+                RESET_BIT(BC.low, 6);
+                break;
+            case 0xB2: // RES 6,D
+                RESET_BIT(DE.high, 6);
+                break;
+            case 0xB3: // RES 6,E
+                RESET_BIT(DE.low, 6);
+                break;
+            case 0xB4: // RES 6,H
+                RESET_BIT(HL.high, 6);
+                break;
+            case 0xB5: // RES 6,L
+                RESET_BIT(HL.low, 6);
+                break;
+            case 0xB6: // RES 6,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 6);
+                write(HL.full, t_u8);
+                break;
+            case 0xB7: // RES 6,A
+                RESET_BIT(A, 6);
+                break;
+            case 0xB8: // RES 7,B
+                RESET_BIT(BC.high, 7);
+                break;
+            case 0xB9: // RES 7,C
+                RESET_BIT(BC.low, 7);
+                break;
+            case 0xBA: // RES 7,D
+                RESET_BIT(DE.high, 7);
+                break;
+            case 0xBB: // RES 7,E
+                RESET_BIT(DE.low, 7);
+                break;
+            case 0xBC: // RES 7,H
+                RESET_BIT(HL.high, 7);
+                break;
+            case 0xBD: // RES 7,L
+                RESET_BIT(HL.low, 7);
+                break;
+            case 0xBE: // RES 7,(HL)
+                t_u8 = read(HL.full);
+                RESET_BIT(t_u8, 7);
+                write(HL.full, t_u8);
+                break;
+            case 0xBF: // RES 7,A
+                RESET_BIT(A, 7);
+                break;
+            case 0xC0: // SET 0,B
+                SET_BIT(BC.high, 0);
+                break;
+            case 0xC1: // SET 0,C
+                SET_BIT(BC.low, 0);
+                break;
+            case 0xC2: // SET 0,D
+                SET_BIT(DE.high, 0);
+                break;
+            case 0xC3: // SET 0,E
+                SET_BIT(DE.low, 0);
+                break;
+            case 0xC4: // SET 0,H
+                SET_BIT(HL.high, 0);
+                break;
+            case 0xC5: // SET 0,L
+                SET_BIT(HL.low, 0);
+                break;
+            case 0xC6: // SET 0,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 0);
+                write(HL.full, t_u8);
+                break;
+            case 0xC7: // SET 0,A
+                SET_BIT(A, 0);
+                break;
+            case 0xC8: // SET 1,B
+                SET_BIT(BC.high, 1);
+                break;
+            case 0xC9: // SET 1,C
+                SET_BIT(BC.low, 1);
+                break;
+            case 0xCA: // SET 1,D
+                SET_BIT(DE.high, 1);
+                break;
+            case 0xCB: // SET 1,E
+                SET_BIT(DE.low, 1);
+                break;
+            case 0xCC: // SET 1,H
+                SET_BIT(HL.high, 1);
+                break;
+            case 0xCD: // SET 1,L
+                SET_BIT(HL.low, 1);
+                break;
+            case 0xCE: // SET 1,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 1);
+                write(HL.full, t_u8);
+                break;
+            case 0xCF: // SET 1,A
+                SET_BIT(A, 1);
+                break;
+            case 0xD0: // SET 2,B
+                SET_BIT(BC.high, 2);
+                break;
+            case 0xD1: // SET 2,C
+                SET_BIT(BC.low, 2);
+                break;
+            case 0xD2: // SET 2,D
+                SET_BIT(DE.high, 2);
+                break;
+            case 0xD3: // SET 2,E
+                SET_BIT(DE.low, 2);
+                break;
+            case 0xD4: // SET 2,H
+                SET_BIT(HL.high, 2);
+                break;
+            case 0xD5: // SET 2,L
+                SET_BIT(HL.low, 2);
+                break;
+            case 0xD6: // SET 2,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 2);
+                write(HL.full, t_u8);
+                break;
+            case 0xD7: // SET 2,A
+                SET_BIT(A, 2);
+                break;
+            case 0xD8: // SET 3,B
+                SET_BIT(BC.high, 3);
+                break;
+            case 0xD9: // SET 3,C
+                SET_BIT(BC.low, 3);
+                break;
+            case 0xDA: // SET 3,D
+                SET_BIT(DE.high, 3);
+                break;
+            case 0xDB: // SET 3,E
+                SET_BIT(DE.low, 3);
+                break;
+            case 0xDC: // SET 3,H
+                SET_BIT(HL.high, 3);
+                break;
+            case 0xDD: // SET 3,L
+                SET_BIT(HL.low, 3);
+                break;
+            case 0xDE: // SET 3,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 3);
+                write(HL.full, t_u8);
+                break;
+            case 0xDF: // SET 3,A
+                SET_BIT(A, 3);
+                break;
+            case 0xE0: // SET 4,B
+                SET_BIT(BC.high, 4);
+                break;
+            case 0xE1: // SET 4,C
+                SET_BIT(BC.low, 4);
+                break;
+            case 0xE2: // SET 4,D
+                SET_BIT(DE.high, 4);
+                break;
+            case 0xE3: // SET 4,E
+                SET_BIT(DE.low, 4);
+                break;
+            case 0xE4: // SET 4,H
+                SET_BIT(HL.high, 4);
+                break;
+            case 0xE5: // SET 4,L
+                SET_BIT(HL.low, 4);
+                break;
+            case 0xE6: // SET 4,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 4);
+                write(HL.full, t_u8);
+                break;
+            case 0xE7: // SET 4,A
+                SET_BIT(A, 4);
+                break;
+            case 0xE8: // SET 5,B
+                SET_BIT(BC.high, 5);
+                break;
+            case 0xE9: // SET 5,C
+                SET_BIT(BC.low, 5);
+                break;
+            case 0xEA: // SET 5,D
+                SET_BIT(DE.high, 5);
+                break;
+            case 0xEB: // SET 5,E
+                SET_BIT(DE.low, 5);
+                break;
+            case 0xEC: // SET 5,H
+                SET_BIT(HL.high, 5);
+                break;
+            case 0xED: // SET 5,L
+                SET_BIT(HL.low, 5);
+                break;
+            case 0xEE: // SET 5,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 5);
+                write(HL.full, t_u8);
+                break;
+            case 0xEF: // SET 5,A
+                SET_BIT(A, 5);
+                break;
+            case 0xF0: // SET 6,B
+                SET_BIT(BC.high, 6);
+                break;
+            case 0xF1: // SET 6,C
+                SET_BIT(BC.low, 6);
+                break;
+            case 0xF2: // SET 6,D
+                SET_BIT(DE.high, 6);
+                break;
+            case 0xF3: // SET 6,E
+                SET_BIT(DE.low, 6);
+                break;
+            case 0xF4: // SET 6,H
+                SET_BIT(HL.high, 6);
+                break;
+            case 0xF5: // SET 6,L
+                SET_BIT(HL.low, 6);
+                break;
+            case 0xF6: // SET 6,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 6);
+                write(HL.full, t_u8);
+                break;
+            case 0xF7: // SET 6,A
+                SET_BIT(A, 6);
+                break;
+            case 0xF8: // SET 7,B
+                SET_BIT(BC.high, 7);
+                break;
+            case 0xF9: // SET 7,C
+                SET_BIT(BC.low, 7);
+                break;
+            case 0xFA: // SET 7,D
+                SET_BIT(DE.high, 7);
+                break;
+            case 0xFB: // SET 7,E
+                SET_BIT(DE.low, 7);
+                break;
+            case 0xFC: // SET 7,H
+                SET_BIT(HL.high, 7);
+                break;
+            case 0xFD: // SET 7,L
+                SET_BIT(HL.low, 7);
+                break;
+            case 0xFE: // SET 7,(HL)
+                t_u8 = read(HL.full);
+                SET_BIT(t_u8, 7);
+                write(HL.full, t_u8);
+                break;
+            case 0xFF: // SET 7,A
+                SET_BIT(A, 7);
+                break;
+        }
     }
     return cycles;
 }
