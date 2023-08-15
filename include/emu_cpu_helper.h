@@ -94,65 +94,65 @@ enum IO {
     IO_WRAM_BANK = 0xFF70, // [FF70]      WRAM Bank Select
 };
 enum Register {
-    REG_P1 = 0x00, // Joypad
-    REG_SB = 0X01, // Serial transfer data
-    REG_SC = 0X02, // Serial transfer control
-    REG_DIV = 0X04, // Divider register
-    REG_TIMA = 0X05, // Timer counter
-    REG_TMA = 0X06, // Timer modulo
-    REG_TAC = 0X07, // Timer control
-    REG_IF = 0X0F, // Interrupt flag
-    REG_NR10 = 0X10, // Sound channel 1 sweep	
-    REG_NR11 = 0X11, // Sound channel 1 length timer & duty cycle
-    REG_NR12 = 0X12, // Sound channel 1 volume & envelope
-    REG_NR13 = 0X13, // Sound channel 1 period low
-    REG_NR14 = 0X14, // Sound channel 1 period high & control
-    REG_NR21 = 0X16, // Sound channel 2 length timer & duty cycle
-    REG_NR22 = 0X17, // Sound channel 2 volume & envelope
-    REG_NR23 = 0X18, // Sound channel 2 period low
-    REG_NR24 = 0X19, // Sound channel 2 period high & control
-    REG_NR30 = 0X1A, // Sound channel 3 DAC enable
-    REG_NR31 = 0X1B, // Sound channel 3 length timer
-    REG_NR32 = 0X1C, // Sound channel 3 output level
-    REG_NR33 = 0X1D, // Sound channel 3 period low
-    REG_NR34 = 0X1E, // Sound channel 3 period high & control
-    REG_NR41 = 0X20, // Sound channel 4 length timer
-    REG_NR42 = 0X21, // Sound channel 4 volume & envelope
-    REG_NR43 = 0X22, // Sound channel 4 frequency & randomness
-    REG_NR44 = 0X23, // Sound channel 4 control
-    REG_NR50 = 0X24, // Master volume & VIN panning
-    REG_NR51 = 0X25, // Sound panning
-    REG_NR52 = 0X26, // Sound on/off
+    REG_P1 = 0x00,      // Joypad
+    REG_SB = 0X01,      // Serial transfer data
+    REG_SC = 0X02,      // Serial transfer control
+    REG_DIV = 0X04,     // Divider register
+    REG_TIMA = 0X05,    // Timer counter
+    REG_TMA = 0X06,     // Timer modulo
+    REG_TAC = 0X07,     // Timer control
+    REG_IF = 0X0F,      // Interrupt flag
+    REG_NR10 = 0X10,    // Sound channel 1 sweep	
+    REG_NR11 = 0X11,    // Sound channel 1 length timer & duty cycle
+    REG_NR12 = 0X12,    // Sound channel 1 volume & envelope
+    REG_NR13 = 0X13,    // Sound channel 1 period low
+    REG_NR14 = 0X14,    // Sound channel 1 period high & control
+    REG_NR21 = 0X16,    // Sound channel 2 length timer & duty cycle
+    REG_NR22 = 0X17,    // Sound channel 2 volume & envelope
+    REG_NR23 = 0X18,    // Sound channel 2 period low
+    REG_NR24 = 0X19,    // Sound channel 2 period high & control
+    REG_NR30 = 0X1A,    // Sound channel 3 DAC enable
+    REG_NR31 = 0X1B,    // Sound channel 3 length timer
+    REG_NR32 = 0X1C,    // Sound channel 3 output level
+    REG_NR33 = 0X1D,    // Sound channel 3 period low
+    REG_NR34 = 0X1E,    // Sound channel 3 period high & control
+    REG_NR41 = 0X20,    // Sound channel 4 length timer
+    REG_NR42 = 0X21,    // Sound channel 4 volume & envelope
+    REG_NR43 = 0X22,    // Sound channel 4 frequency & randomness
+    REG_NR44 = 0X23,    // Sound channel 4 control
+    REG_NR50 = 0X24,    // Master volume & VIN panning
+    REG_NR51 = 0X25,    // Sound panning
+    REG_NR52 = 0X26,    // Sound on/off
     REG_WAVERAM = 0X30, // Storage for one of the sound channels’ waveform
-    REG_LCDC = 0X40, // LCD control
-    REG_STAT = 0X41, // LCD status
-    REG_SCY = 0X42, // Viewport Y position
-    REG_SCX = 0X43, // Viewport X position
-    REG_LY = 0X44, // LCD Y coordinate
-    REG_LYC = 0X45, // LY compare
-    REG_DMA = 0X46, // OAM DMA source address & start
-    REG_BGP = 0X47, // BG palette data
-    REG_OBP0 = 0X48, // OBJ palette 0 data
-    REG_OBP1 = 0X49, // OBJ palette 1 data
-    REG_WY = 0X4A, // Window Y position
-    REG_WX = 0X4B, // Window X position plus 7
-    REG_KEY1 = 0X4D, // Prepare speed switch
-    REG_VBK = 0X4F, // VRAM bank
-    REG_HDMA1 = 0X51, // VRAM DMA source high
-    REG_HDMA2 = 0X52, // VRAM DMA source low
-    REG_HDMA3 = 0X53, // VRAM DMA destination high
-    REG_HDMA4 = 0X54, // VRAM DMA destination low
-    REG_HDMA5 = 0X55, // VRAM DMA length/mode/start	
-    REG_RP = 0X56, // Infrared communications port
-    REG_BGPI = 0X68, // Background color palette specification / Background palette index
-    REG_BGPD = 0X69, // Background color palette data / Background palette data
-    REG_OBPI = 0X6A, // OBJ color palette specification / OBJ palette index
-    REG_OBPD = 0X6B, // OBJ color palette data / OBJ palette data
-    REG_OPRI = 0X6C, // Object priority mode
-    REG_SVBK = 0X70, // WRAM bank
-    REG_PCM12 = 0X76, // Audio digital outputs 1 & 2
-    REG_PCM34 = 0X77, // Audio digital outputs 3 & 4
-    REG_IE = 0XFF, // Interrupt enable
+    REG_LCDC = 0X40,    // LCD control
+    REG_STAT = 0X41,    // LCD status
+    REG_SCY = 0X42,     // Viewport Y position
+    REG_SCX = 0X43,     // Viewport X position
+    REG_LY = 0X44,      // LCD Y coordinate
+    REG_LYC = 0X45,     // LY compare
+    REG_DMA = 0X46,     // OAM DMA source address & start
+    REG_BGP = 0X47,     // BG palette data
+    REG_OBP0 = 0X48,    // OBJ palette 0 data
+    REG_OBP1 = 0X49,    // OBJ palette 1 data
+    REG_WY = 0X4A,      // Window Y position
+    REG_WX = 0X4B,      // Window X position plus 7
+    REG_KEY1 = 0X4D,    // Prepare speed switch
+    REG_VBK = 0X4F,     // VRAM bank
+    REG_HDMA1 = 0X51,   // VRAM DMA source high
+    REG_HDMA2 = 0X52,   // VRAM DMA source low
+    REG_HDMA3 = 0X53,   // VRAM DMA destination high
+    REG_HDMA4 = 0X54,   // VRAM DMA destination low
+    REG_HDMA5 = 0X55,   // VRAM DMA length/mode/start	
+    REG_RP = 0X56,      // Infrared communications port
+    REG_BGPI = 0X68,    // Background color palette specification / Background palette index
+    REG_BGPD = 0X69,    // Background color palette data / Background palette data
+    REG_OBPI = 0X6A,    // OBJ color palette specification / OBJ palette index
+    REG_OBPD = 0X6B,    // OBJ color palette data / OBJ palette data
+    REG_OPRI = 0X6C,    // Object priority mode
+    REG_SVBK = 0X70,    // WRAM bank
+    REG_PCM12 = 0X76,   // Audio digital outputs 1 & 2
+    REG_PCM34 = 0X77,   // Audio digital outputs 3 & 4
+    REG_IE = 0XFF,      // Interrupt enable
 };
 enum RomHeader {
     ROM_ENTRY = 0x100, // starting point after boot ROM
@@ -178,6 +178,21 @@ enum RTCRegister {
     RTC_DL = 0x0B, // Lower 8 bits of Day Counter (0x00-0xFF)
     RTC_DH = 0x0C, // b0-Upper 1 bit of Day Counter, b6-Halt Flag, b7-Carry Bit
 };
+enum InterruptBit {
+    INT_BIT_VBLANK  = 0,
+    INT_BIT_STAT,
+    INT_BIT_TIMER,
+    INT_BIT_SERIAL,
+    INT_BIT_JOYPAD
+};
+enum InterruptVector {
+    INT_VEC_BLANK   = 0x40,
+    INT_VEC_STAT    = 0x48,
+    INT_VEC_TIMER   = 0x50,
+    INT_VEC_SERIAL  = 0x58,
+    INT_VEC_JOYPAD  = 0x60
+};
+
 #define BANKSIZE_ROM    0x4000
 #define BANKSIZE_ERAM   0x2000
 #define BANKSIZE_VRAM   0x2000

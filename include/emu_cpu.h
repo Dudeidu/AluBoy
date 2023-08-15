@@ -7,7 +7,7 @@
 
 int emu_cpu_init(u8* rom_buffer);
 
-void emu_cpu_update();
+void emu_cpu_update(u8* inputs);
 
 void emu_cpu_cleanup();
 

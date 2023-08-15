@@ -14,57 +14,71 @@
 
 
 // Hardware registers
-u8 A;   // Accumulator
-u8 F_Z; // Zero flag
-u8 F_N; // Subtract flag
-u8 F_H; // Half carry flag
-u8 F_C; // Carry flag 
+u8  A;              // Accumulator
+u8  F_Z;            // Zero flag
+u8  F_N;            // Subtract flag
+u8  F_H;            // Half carry flag
+u8  F_C;            // Carry flag 
 BytePair BC;
 BytePair DE;
 BytePair HL;
-BytePair SP; // Stack Pointer
-u16 PC; // Program Counter/Pointer
+BytePair SP;        // Stack Pointer
+u16 PC;             // Program Counter/Pointer
 
-u8 prefix_cb;
+u8  prefix_cb;
 
 // Memory-mapped registers
-u8 reg[0x100];  // Refers to Register enum
-u8 rtc[0xD];    // Refers to RTCRegister enum
+u8  reg[0x100];     // Refers to Register enum
+u8  rtc[0xD];       // Refers to RTCRegister enum
 
 // Memory banks
 u8* rom;    // loaded from .gb / .gbc
 u8* eram;   // external ram (cartridge)
-u8 vram[2 * BANKSIZE_VRAM];
-u8 wram[8 * BANKSIZE_ROM];
-u8 oam[0xA0];
-u8 hram[0x80];
-u16 rom_banks;  // up to 512 banks of 16 KB each (8MB)
-u8 eram_banks;  // up to 16 banks of 8 KB each (128 KB)
+u8  vram[2 * BANKSIZE_VRAM];
+u8  wram[8 * BANKSIZE_ROM];
+u8  oam[0xA0];
+u8  hram[0x80];
+u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
+u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
+
+// Hardware timers
+u8  double_speed;
+u16 div_counter;    // every >256, DIV++
+u8  timer_enabled;  // bit  2   of reg TAC
+u16 timer_speed;    // bits 0-1 of reg TAC
+u16 timer_counter;  // every >timer_speed, TIMA++
+
+// Interrupts
+u8 interrupts_enabled;
 
 // Header information
 unsigned char title[17]; // 16 + '\0'
 unsigned char licensee_code_new[2];
-u8 licensee_code_old;
-u8 destination_code;
-u8 cgb_flag;
-u8 sgb_flag;
-u8 cart_type;
-u8 rom_version;
-u8 checksum_header;
+u8  licensee_code_old;
+u8  destination_code;
+u8  cgb_flag;
+u8  sgb_flag;
+u8  cart_type;
+u8  rom_version;
+u8  checksum_header;
 u16 checksum_global;
-u8 rom_size_code;
-u8 eram_size_code;
-u8 mbc;             // 0: ROM only | 1: MBC1 | 2: MBC2 | 3: MBC3 | 4: MMM01 | 5: MBC5 
+u8  rom_size_code;
+u8  eram_size_code;
+u8  mbc;            // 0: ROM only | 1: MBC1 | 2: MBC2 | 3: MBC3 | 4: MMM01 | 5: MBC5 
 
 // MBC Registers
 u16 rom_bank;       // current bank
-u8 rom_bank_2;      // secondary ROM banking register
-u8 eram_bank;
-u8 eram_enabled;    // RAM/RTC Enable mbc register
-u8 mbc_mode;        // For mbc1 only - 0: 2MiB ROM/8KiB RAM | 1: 512KiB ROM/4*8Kib RAM
-u8 rtc_latch_flag;
-u8 rtc_latch_reg;
-u8 rtc_select_reg;  // Indicated which RTC register is currently mapped into memory at A000 - BFFF
+u8  rom_bank_2;     // secondary ROM banking register
+u8  eram_bank;
+u8  eram_enabled;   // RAM/RTC Enable mbc register
+u8  mbc_mode;       // For mbc1 only - 0: 2MiB ROM/8KiB RAM | 1: 512KiB ROM/4*8Kib RAM
+u8  rtc_latch_flag;
+u8  rtc_latch_reg;
+u8  rtc_select_reg; // Indicated which RTC register is currently mapped into memory at A000 - BFFF
+
+// Tests
+int emu_seconds = 0;
+u8 test_finished = 0;
 
 // Arithmetic
 void inc_u8(u8* a) {
@@ -127,6 +141,7 @@ void or_u8(u8 b) {
     A |= b;
     F_Z = (A == 0);
 }
+
 // Rotates & Shifts 
 void rlc(u8* a) {
     F_C = GET_BIT(*a, 7);
@@ -238,6 +253,9 @@ int power_up()
     reg[REG_TIMA] = 0x00;
     reg[REG_TMA] = 0x00;
     reg[REG_TAC] = 0xF8;
+        timer_speed = 1024;
+        timer_enabled = 0;
+
     reg[REG_IF] = 0xE1;
 
     reg[REG_NR10] = 0x80;
@@ -283,7 +301,7 @@ int power_up()
 
     reg[REG_KEY1] = 0xFF;
 
-    reg[REG_VBK] = 0xFF;
+    reg[REG_VBK] = 0x00;
     reg[REG_HDMA1] = 0xFF;
     reg[REG_HDMA2] = 0xFF;
     reg[REG_HDMA3] = 0xFF;
@@ -297,7 +315,7 @@ int power_up()
     reg[REG_OBPI] = 0xFF;
     reg[REG_OBPD] = 0xFF;
 
-    reg[REG_SVBK] = 0xFF;
+    reg[REG_SVBK] = 0x00;
 
     reg[REG_IE] = 0x00;
 
@@ -361,7 +379,7 @@ int emu_cpu_init(u8* rom_buffer)
     }
 
     // Licensee code
-    memcpy(title, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
+    memcpy(licensee_code_new, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
     printf("Licensee new: %c%c\n", licensee_code_new[0], licensee_code_new[1]);
     licensee_code_old = rom[ROM_LICENSEE_OLD];
     printf("Licensee old: %02X\n", licensee_code_old);
@@ -672,7 +690,45 @@ int write(u16 addr, u8 value)
                 }
                 // I/O Registers
                 else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                    reg[addr & 0xFF] = value;   // Convert to range 0-255
+                    if (addr == 0xFF01 || addr == 0xFF02)
+                    {
+                        u8 a = 0;
+                        //printf("yo\n");
+                    }
+                    switch (addr & 0xFF) {
+                        case REG_DIV:
+                            reg[REG_DIV] = 0;
+                            break;
+                        case REG_TAC:
+                            // bit 0–1: Select at which frequency TIMA increases
+                            switch (value & 0x3) {
+                                case 0: timer_speed = 1024; break;
+                                case 1: timer_speed = 16; break;
+                                case 2: timer_speed = 64; break;
+                                case 3: timer_speed = 256; break;
+                            }
+                            // bit 2: Enable timer
+                            timer_enabled = GET_BIT(value, 2);
+                            reg[addr & 0xFF] = value;
+                            break;
+                        case REG_IF:
+                            /*
+                            bits:
+                            0: VBlank
+                            1: LCD STAT
+                            2: Timer
+                            3: Serial
+                            4: Joypad
+                            */
+                            
+                            reg[addr & 0xFF] = value;
+                            break;
+
+                        default:
+                            reg[addr & 0xFF] = value;   // Convert to range 0-255
+                            break;
+                    }
+                    
                 }
                 // High RAM
                 else if (addr >= MEM_HRAM && addr < MEM_IE) {
@@ -689,12 +745,14 @@ int write(u16 addr, u8 value)
 
 
 u8 execute_instruction(u8 op) {
-    u8       cycles = op_cycles_lut[op];
+    u8       cycles;
     s8       t_s8;
     u8       t_u8;
     BytePair t_u16;
 
     if (!prefix_cb) {
+        cycles = op_cycles_lut[op];
+
         switch (op) {  // [Z N H C]
             case 0x00: // NOP
                 break;
@@ -785,7 +843,7 @@ u8 execute_instruction(u8 op) {
                 F_H = 0;
                 break;
             case 0x18: // JR r8
-                t_s8 = (s8)read(PC++);
+                t_s8 = (s8)(read(PC++));
                 PC += t_s8;
                 break;
             case 0x19: // ADD HL,DE
@@ -816,7 +874,7 @@ u8 execute_instruction(u8 op) {
                 F_H = 0;
                 break;
             case 0x20: // JR NZ,r8
-                t_s8 = (s8)read(PC++);
+                t_s8 = (s8)(read(PC++));
                 if (!F_Z) {
                     PC += t_s8;
                     cycles += 4; // additional cycles if action was taken
@@ -899,7 +957,6 @@ u8 execute_instruction(u8 op) {
             case 0x31: // LD SP,d16
                 SP.low = read(PC++);
                 SP.high = read(PC++);
-                PC += 2;
                 break;
             case 0x32: // LD (HL-),A
                 write(HL.full--, A);
@@ -951,7 +1008,7 @@ u8 execute_instruction(u8 op) {
                 A = read(PC++);
                 break;
             case 0x3F: // CCF
-                F_C ^= F_C;
+                F_C ^= 1;
                 F_H = 0;
                 F_N = 0;
                 break;
@@ -1342,9 +1399,9 @@ u8 execute_instruction(u8 op) {
                 break;
             case 0xC0: // RET NZ
                 // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                t_u16.low = read(SP.full++);
-                t_u16.high = read(SP.full++);
                 if (!F_Z) {
+                    t_u16.low = read(SP.full++);
+                    t_u16.high = read(SP.full++);
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1367,9 +1424,13 @@ u8 execute_instruction(u8 op) {
                 PC = t_u16.full;
                 break;
             case 0xC4: // CALL NZ,a16
-                t_u16.high = read(--SP.full);
-                t_u16.low = read(--SP.full);
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
                 if (!F_Z) {
+                    // push PC onto stack, then jump to address
+                    write(--SP.full, (PC >> 8) & 0xFF);
+                    write(--SP.full, (PC & 0xFF));
+                    // jump to a16
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1389,9 +1450,9 @@ u8 execute_instruction(u8 op) {
                 break;
             case 0xC8: // RET Z
                 // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                t_u16.low = read(SP.full++);
-                t_u16.high = read(SP.full++);
                 if (F_Z) {
+                    t_u16.low = read(SP.full++);
+                    t_u16.high = read(SP.full++);
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1413,16 +1474,22 @@ u8 execute_instruction(u8 op) {
                 prefix_cb = 1;
                 break;
             case 0xCC: // CALL Z,a16
-                t_u16.high = read(--SP.full);
-                t_u16.low = read(--SP.full);
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
                 if (F_Z) {
+                    // push PC onto stack, then jump to address
+                    write(--SP.full, (PC >> 8) & 0xFF);
+                    write(--SP.full, (PC & 0xFF));
                     PC = t_u16.full;
                     cycles += 12;
                 }
                 break;
             case 0xCD: // CALL a16
-                t_u16.high = read(--SP.full);
-                t_u16.low = read(--SP.full);
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
                 PC = t_u16.full;
                 break;
             case 0xCE: // ADC A,d8
@@ -1436,10 +1503,10 @@ u8 execute_instruction(u8 op) {
                 break;
 
             case 0xD0: // RET NC
-                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                t_u16.low = read(SP.full++);
-                t_u16.high = read(SP.full++);
                 if (!F_C) {
+                    // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                    t_u16.low = read(SP.full++);
+                    t_u16.high = read(SP.full++);
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1460,9 +1527,12 @@ u8 execute_instruction(u8 op) {
                 // nothing here
                 break;
             case 0xD4: // CALL NC,a16
-                t_u16.high = read(--SP.full);
-                t_u16.low = read(--SP.full);
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
                 if (!F_C) {
+                    // push PC onto stack, then jump to address
+                    write(--SP.full, (PC >> 8) & 0xFF);
+                    write(--SP.full, (PC & 0xFF));
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1481,10 +1551,10 @@ u8 execute_instruction(u8 op) {
                 PC = 0x0010;
                 break;
             case 0xD8: // RET C
-                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                t_u16.low = read(SP.full++);
-                t_u16.high = read(SP.full++);
                 if (F_C) {
+                    // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                    t_u16.low = read(SP.full++);
+                    t_u16.high = read(SP.full++);
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1493,7 +1563,7 @@ u8 execute_instruction(u8 op) {
                 t_u16.low = read(SP.full++);
                 t_u16.high = read(SP.full++);
                 PC = t_u16.full;
-                reg[REG_IE] = 1;
+                interrupts_enabled = 1;
                 break;
             case 0xDA: // JP C,a16
                 t_u16.low = read(PC++);
@@ -1507,9 +1577,12 @@ u8 execute_instruction(u8 op) {
                 // nothing here
                 break;
             case 0xDC: // CALL C,a16
-                t_u16.high = read(--SP.full);
-                t_u16.low = read(--SP.full);
+                t_u16.low = read(PC++);
+                t_u16.high = read(PC++);
                 if (F_C) {
+                    // push PC onto stack, then jump to address
+                    write(--SP.full, (PC >> 8) & 0xFF);
+                    write(--SP.full, (PC & 0xFF));
                     PC = t_u16.full;
                     cycles += 12;
                 }
@@ -1618,7 +1691,7 @@ u8 execute_instruction(u8 op) {
                 A = read(MEM_IO + BC.low);
                 break;
             case 0xF3: // DI
-                reg[REG_IE] = 0;
+                interrupts_enabled = 0;
                 break;
             case 0xF4:
                 // nothing here
@@ -1663,7 +1736,7 @@ u8 execute_instruction(u8 op) {
                 A = read(t_u16.full);
                 break;
             case 0xFB: // EI
-                reg[REG_IE] = 1;
+                interrupts_enabled = 1;
                 break;
             case 0xFC:
                 // nothing here
@@ -1685,6 +1758,10 @@ u8 execute_instruction(u8 op) {
     // Prefix CB
     else {
         prefix_cb = 0;
+
+        if ((op & 0xF) == 0x6 || (op & 0xF) == 0xE) cycles = 16;
+        else cycles = 8;
+
         switch (op)
         {
             case 0x00: // RLC B
@@ -2508,23 +2585,113 @@ u8 execute_instruction(u8 op) {
     return cycles;
 }
 
+// Updates the P1/JOYP register with the current inputs.
+void update_inputs(u8* in) {
+    // get [8] sized array with the inputs from SDL
+    //   3      2       1       0 
+    // down    up     left    right
+    //   7      6       5       4     
+    // start  select    B       A 
+    // 
+    // 1 = pressed, 0 = unpressed
+    // need to flip the inputs we got from SDL since the input signals here are reversed
 
-void emu_cpu_update()
+    u8 inputs_direction = ((!in[3] << 3) | (!in[2] << 2) | (!in[1] << 1) | (!in[0] << 0));
+    u8 inputs_action    = ((!in[7] << 3) | (!in[6] << 2) | (!in[5] << 1) | (!in[4] << 0));
+
+    u8 select_direction = !GET_BIT(reg[REG_P1], 4);
+    u8 select_action    = !GET_BIT(reg[REG_P1], 5);
+
+    if (select_direction && select_action) { // AND layouts when both are selected
+        reg[REG_P1] = 0xC0 | (inputs_direction & inputs_action); // 0b 1100 ????
+    }
+    else if (!select_direction) {
+        reg[REG_P1] = 0xD0 | inputs_action; // 0b 1101 ????
+    }
+    else if (!select_action) {
+        reg[REG_P1] = 0xE0 | inputs_action; // 0b 1110 ????
+    }
+    else { 
+        reg[REG_P1] = 0xFF; // 0b 0011 1111
+    }
+}
+
+void update_timers(u8 cycles) {
+    u8 clock = (cycles << double_speed);
+
+    // DIV is incremented at 16384Hz / 32768Hz in double speed
+    div_counter += clock;
+    if (div_counter > 0xFF) {
+        div_counter &= 0xFF;
+
+        reg[REG_DIV] = (reg[REG_DIV] + 1) & 0xFF;
+    }
+
+    // TIMA is incremented at the clock frequency specified by the TAC register
+    if (timer_enabled) {
+        u16 sp = (timer_speed >> double_speed);
+
+        timer_counter += clock;
+        while (timer_counter > sp) {
+            timer_counter -= sp;
+
+            u8 tima_old = reg[REG_TIMA];
+            reg[REG_TIMA] = (tima_old + 1) & 0xFF;
+            // if overflow occured
+            if (reg[REG_TIMA] < tima_old) {
+                reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
+
+                // request interrupt
+
+            }
+        }
+    }
+    //reg[REG_TIMA]
+    /*
+    u8  double_speed;
+    u16 div_counter;    // every >256, DIV++
+    u8  timer_enabled;  // bit  2   of reg TAC
+    u16 timer_speed;    // bits 0-1 of reg TAC
+    */
+
+}
+
+void emu_cpu_update(u8* inputs)
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
     int cycles_this_update = 0;
+
+    // Updates the P1/JOYP register with the current inputs
+    update_inputs(inputs);
+
     while (cycles_this_update < MAXDOTS)
     {
         // Fetch instruction
         op = read(PC++);
         cycles = execute_instruction(op);
-        
-        //cycles = 4; // instead of 4, a value is returned by the operand instruction
+
         cycles_this_update += cycles;
-        //UpdateTimers(cycles);
+        update_timers(cycles);
+        //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
         //UpdateGraphics(cycles);
         //DoInterupts();
+
+        //blarggs test - serial output
+        if (reg[REG_SC] == 0x81) {
+            char c = reg[REG_SB];
+            printf("%c", c);
+            reg[REG_SC] = 0x0;
+        }
+        //printf("%4x", op);
+    }
+    //if (reg[REG_SB] != 0) printf("%c", reg[REG_SB]);
+    emu_seconds++;
+    if (!test_finished && emu_seconds >= 120 * 60)
+    {
+        //`B = 3, C = 5, D = 8, E = 13, H = 21, L = 34`.
+        printf("results:\nB: %d, C: %d, D: %d, E: %d, H: %d, L: %d\n", BC.high, BC.low, DE.high, DE.low, HL.high, HL.low);
+        test_finished = 1;
     }
     //printf("cpu cycles: %d\n", cycles_this_update);
     //printf("fps: %d, cpu: %d\n", timer_total, cycles_this_update);

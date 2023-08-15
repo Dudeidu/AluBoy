@@ -17,9 +17,10 @@
 
 SDL_Window* window = NULL;
 SDL_Event   window_event;
+const Uint8* kb_state;
 
 int         fps = 60.0;
-float       tick_rate = 1000.0 / 60.0; // Milliseconds per frame
+float       tick_rate = 60.0 / 60.0; // Milliseconds per frame
 
 int         window_scale = 4;
 u8          redraw_flag = 1;
@@ -114,8 +115,10 @@ int application_init(const char* title) {
     }
 
     // Set the event filter
-    SDL_SetEventFilter(EventFilter, NULL); // NULL for user data
-
+    //SDL_SetEventFilter(EventFilter, NULL); // NULL for user data
+    int num_keys;
+    kb_state = SDL_GetKeyboardState(&num_keys);
+    
     // Initialize OpenGL stuff
     if (!graphics_init(window))
     {
@@ -125,7 +128,8 @@ int application_init(const char* title) {
     }
 
     // Open rom
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
+    //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/02-write_timing.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -154,6 +158,10 @@ int application_init(const char* title) {
         return -1;
     }
 
+    printf("100 to signed: %d\n",   (s8)((u8)100));
+    printf("200 to signed: %d\n",   (s8)((u8)200));
+    printf("255 to signed: %d\n",   (s8)((u8)255));
+    printf("0 to signed: %d\n",     (s8)((u8)0));
     
 
     return 0;
@@ -187,9 +195,22 @@ void application_update() {
             }
             break;
             case SDL_KEYDOWN:
-                printf("%c\n", window_event.key.keysym.sym);
+                //
+                break;
             }
         }
+        // Array of pressed inputs, which is later passed to the emulator.
+        u8 inputs[8] = { 
+            kb_state[SDL_SCANCODE_RIGHT], 
+            kb_state[SDL_SCANCODE_LEFT], 
+            kb_state[SDL_SCANCODE_UP],
+            kb_state[SDL_SCANCODE_DOWN],
+            kb_state[SDL_SCANCODE_X],
+            kb_state[SDL_SCANCODE_Z],
+            kb_state[SDL_SCANCODE_A],
+            kb_state[SDL_SCANCODE_S]
+        };
+
         // todo optimization: batch events (like keyboard inputs) together and only after
         // all events are polled process the inputs.
 
@@ -214,9 +235,9 @@ void application_update() {
 
         // Update frame logic
         timer_total += tick_rate;
-            
+
         // Update cpu logic
-        emu_cpu_update();
+        emu_cpu_update(&inputs);
 
         // Draw
         application_draw();
