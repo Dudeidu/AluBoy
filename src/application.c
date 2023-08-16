@@ -129,7 +129,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/02-write_timing.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/03-op sp,hl.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -157,12 +157,6 @@ int application_init(const char* title) {
         SDL_Quit();
         return -1;
     }
-
-    printf("100 to signed: %d\n",   (s8)((u8)100));
-    printf("200 to signed: %d\n",   (s8)((u8)200));
-    printf("255 to signed: %d\n",   (s8)((u8)255));
-    printf("0 to signed: %d\n",     (s8)((u8)0));
-    
 
     return 0;
 }

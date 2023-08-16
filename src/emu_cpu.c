@@ -12,6 +12,8 @@
 #include "emu_cpu_helper.h"
 #include "macros.h"
 
+#include "emu_gpu.h"
+
 
 // Hardware registers
 u8  A;              // Accumulator
@@ -32,8 +34,8 @@ u8  reg[0x100];     // Refers to Register enum
 u8  rtc[0xD];       // Refers to RTCRegister enum
 
 // Memory banks
-u8* rom;    // loaded from .gb / .gbc
-u8* eram;   // external ram (cartridge)
+u8* rom  = NULL;    // loaded from .gb / .gbc
+u8* eram = NULL;    // external ram (cartridge)
 u8  vram[2 * BANKSIZE_VRAM];
 u8  wram[8 * BANKSIZE_ROM];
 u8  oam[0xA0];
@@ -49,7 +51,12 @@ u16 timer_speed;    // bits 0-1 of reg TAC
 u16 timer_counter;  // every >timer_speed, TIMA++
 
 // Interrupts
-u8 interrupts_enabled;
+u8 interrupts_enabled; // IME flag
+u8 halted;
+
+// Graphics
+u16 scanline_counter; // every >SCANLINE_DOTS, update LY
+
 
 // Header information
 unsigned char title[17]; // 16 + '\0'
@@ -100,23 +107,45 @@ void add_u8(u8* a, u8 b) {
     (*a) += b;
     F_Z = (*a == 0);
 }
+void adc_u8(u8* a, u8 b) {
+    u8 carry = F_C;  // Store the carry flag
+    int sum = A + b + carry;  // Calculate the sum
+    u8 result = (u8)sum;
+
+    F_H = (((A & 0xF) + (b & 0xF) + carry) > 0xF);
+    F_C = (sum > 0xFF);  // Update the carry flag
+    A = result;  // Store the result in *a
+    F_N = 0;  // Set the subtraction flag
+    F_Z = (A == 0);
+}
 void add_u16(u16* a, u16 b) {
     F_H = HALF_CARRY_U16_ADD(*a, b);
-    F_C = CARRY_ADD(*a, b);
+    F_C = CARRY_ADD_U16(*a, b);
     F_N = 0;
     (*a) += b;
 }
 void sub_u8(u8 b) {
     F_H = HALF_CARRY_U8_SUB(A, b);
-    F_C = CARRY_ADD(A, b);
+    F_C = CARRY_SUB(A, b);
     F_N = 1;
     A -= b;
+    F_Z = (A == 0);
+}
+void sbc_u8(u8 b) {
+    u8 carry = F_C;  // Store the carry flag
+    int diff = A - b - carry;  // Calculate the difference with borrow
+    u8 result = (u8)diff;
+
+    F_H = (((A & 0xf) - (b & 0xf) - carry) < 0);
+    F_C = (diff < 0);  // Update the carry flag
+    A = result;  // Store the result in *a
+    F_N = 1;  // Set the subtraction flag
     F_Z = (A == 0);
 }
 void cp_u8(u8 b) {
     // Same as sub, but discards the results and only updates the flags
     F_H = HALF_CARRY_U8_SUB(A, b);
-    F_C = CARRY_ADD(A, b);
+    F_C = CARRY_SUB(A, b);
     F_N = 1;
     F_Z = (A - b == 0);
 }
@@ -144,6 +173,7 @@ void or_u8(u8 b) {
 
 // Rotates & Shifts 
 void rlc(u8* a) {
+    // rotate left carry
     F_C = GET_BIT(*a, 7);
     *a = ROTATE_LEFT(*a, 1, 8);
     F_Z = (*a == 0);
@@ -151,6 +181,7 @@ void rlc(u8* a) {
     F_H = 0;
 }
 void rrc(u8* a) {
+    // rotate right carry
     F_C = GET_BIT(*a, 0);
     *a = ROTATE_RIGHT(*a, 1, 8);
     F_Z = (*a == 0);
@@ -158,8 +189,9 @@ void rrc(u8* a) {
     F_H = 0;
 }
 void rl(u8* a) {
+    // rotate left
     u8 temp = F_C;
-    F_C = GET_BIT(A, 7);
+    F_C = GET_BIT(*a, 7);
     *a = (*a << 1) & 0xFF;
     if (temp) SET_BIT(*a, 0);
 
@@ -168,8 +200,9 @@ void rl(u8* a) {
     F_H = 0;
 }
 void rr(u8* a) {
+    // rotate right
     u8 temp = F_C;
-    F_C = GET_BIT(A, 0);
+    F_C = GET_BIT(*a, 0);
     *a = (*a >> 1) & 0xFF;
     if (temp) SET_BIT(*a, 7);
 
@@ -178,8 +211,9 @@ void rr(u8* a) {
     F_H = 0;
 }
 void sla(u8* a) {
+    // shift left arithmetic
     // left shift into carry, conserving the msb
-    F_C = GET_BIT(A, 7);
+    F_C = GET_BIT(*a, 7);
     *a = (*a << 1) & 0xFF;
 
     F_Z = (*a == 0);
@@ -187,6 +221,7 @@ void sla(u8* a) {
     F_H = 0;
 }
 void sra(u8* a) {
+    // shift right arithmetic
     // right shift into carry, conserving the msb
     u8 temp = GET_BIT(*a, 7);
     F_C = GET_BIT(*a, 0);
@@ -200,11 +235,12 @@ void sra(u8* a) {
     F_H = 0;
 }
 void srl(u8* a) {
+    // shift right logical
     // right shift into carry, msb set to 0
     F_C = GET_BIT(*a, 0);
     *a = (*a >> 1) & 0xFF;
     // msb set to 0
-    SET_BIT(*a, 7);
+    RESET_BIT(*a, 7);
 
     F_Z = (*a == 0);
     F_N = 0;
@@ -223,15 +259,26 @@ void test_bit(u8* a, u8 b) {
     F_H = 1;
 }
 
+// Misc
+u8 interrupt_is_pending() {
+    return ((reg[REG_IE] & 0xF) & (reg[REG_IF] & 0xF));
+}
+
 int power_up()
 {
-    // Reset registers to their default values
-    A = 0x11;
-    //AF.low          = 0xB0;
+    // Reset registers to their default values (DMG)
+    A = 0x01;
     F_Z = 1;
     F_N = 0;
-    F_H = 1;
-    F_C = 1;
+    if (checksum_header == 0)
+    {
+        F_H = 0;
+        F_C = 0;
+    }
+    else {
+        F_H = 1;
+        F_C = 1;
+    }
 
     BC.full = 0x0013;
     DE.full = 0x00D8;
@@ -240,21 +287,23 @@ int power_up()
     PC = 0x0100;
 
     prefix_cb = 0;
+    interrupts_enabled = 0;
+    halted = 0;
 
     mbc_mode = 0;
     rom_bank = 1;
     rom_bank_2 = 0;
     eram_enabled = 0;
 
-    reg[REG_P1] = 0xC7;
+    reg[REG_P1] = 0xCF;
     reg[REG_SB] = 0x00;
-    reg[REG_SC] = 0x7F;
-    reg[REG_DIV] = 0x18;
+    reg[REG_SC] = 0x7E;
+    reg[REG_DIV] = 0xAB;
     reg[REG_TIMA] = 0x00;
     reg[REG_TMA] = 0x00;
     reg[REG_TAC] = 0xF8;
-        timer_speed = 1024;
-        timer_enabled = 0;
+    timer_speed = 256;
+    timer_enabled = 0;
 
     reg[REG_IF] = 0xE1;
 
@@ -285,13 +334,13 @@ int power_up()
     reg[REG_NR52] = 0xF1; // F1-GB, F0-SGB
 
     reg[REG_LCDC] = 0x91;
-    reg[REG_STAT] = 0x81;
+    reg[REG_STAT] = 0x85;
     reg[REG_SCY] = 0x00;
     reg[REG_SCX] = 0x00;
-    reg[REG_LY] = 0x91;
+    reg[REG_LY] = 0x00;
     reg[REG_LYC] = 0x00;
 
-    reg[REG_DMA] = 0x00;
+    reg[REG_DMA] = 0xFF;
     reg[REG_BGP] = 0xFC;
     reg[REG_OBP0] = 0xFF;
     reg[REG_OBP1] = 0xFF;
@@ -318,7 +367,6 @@ int power_up()
     reg[REG_SVBK] = 0x00;
 
     reg[REG_IE] = 0x00;
-
     return 0;
 }
 
@@ -332,6 +380,10 @@ int emu_cpu_init(u8* rom_buffer)
     u8 mbc_lut_size = 31;
 
     rom = rom_buffer;
+
+    // Load boot ROM
+    memcpy(rom, boot_rom, 0x100);
+
     // Get ROM header data
 
     // Title
@@ -378,11 +430,21 @@ int emu_cpu_init(u8* rom_buffer)
         default:    eram_banks = 0;  break;
     }
 
+    // TODO - load save file if exists
+    if (eram != NULL) free(eram);
+    if (eram_banks > 0) {
+        eram = (u8*)malloc(sizeof(u8) * eram_banks * BANKSIZE_ERAM);
+    }
+    else {
+        eram = NULL;
+    }
+
     // Licensee code
     memcpy(licensee_code_new, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
     printf("Licensee new: %c%c\n", licensee_code_new[0], licensee_code_new[1]);
     licensee_code_old = rom[ROM_LICENSEE_OLD];
     printf("Licensee old: %02X\n", licensee_code_old);
+    
     // Misc
     destination_code    = rom[ROM_DESTINATION];
     rom_version         = rom[ROM_VERSION];
@@ -433,6 +495,7 @@ u8 read(u16 addr)
             if (!eram_enabled) return 0xFF;
             if (mbc == 2) {
                 // Half bytes, Bottom 9 bits of address are used to index RAM
+                if (eram_bank >= eram_banks) return 0xFF;
                 return eram[addr & 0x1FF];
             }
             else if (mbc == 3 && rtc_select_reg > 0) {
@@ -440,6 +503,7 @@ u8 read(u16 addr)
                 return rtc[rtc_select_reg];
             }
             else {
+                if (eram_bank >= eram_banks) return 0xFF;
                 return eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)];
             }
         case 0xC:
@@ -459,17 +523,18 @@ u8 read(u16 addr)
             }
             // I/O Registers
             else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                return reg[addr & 0xFF];   // Convert to range 0-255
+                return reg[addr - MEM_IO];   // Convert to range 0-255
             }
             // High RAM
             else if (addr >= MEM_HRAM && addr < MEM_IE) {
-                return hram[addr & 0x7F];  // Convert to range 0-127
+                return hram[addr - MEM_HRAM];  // Convert to range 0-127
             }
             // Interrupt Enable register (IE)
             else {
                 return reg[REG_IE];
             }
     }
+    return 0xFF;
 }
 
 int write(u16 addr, u8 value)
@@ -641,7 +706,7 @@ int write(u16 addr, u8 value)
                     case 0x5:
                     {
                         // RAM bank number
-                        if (eram_banks >= value & 0xF) eram_bank = (value & 0xF);
+                        if (eram_banks >= (value & 0xF)) eram_bank = (value & 0xF);
                     } break;
                 }
             } break;
@@ -661,6 +726,7 @@ int write(u16 addr, u8 value)
                 if (!eram_enabled) return -1;
                 if (mbc == 2) {
                     // Half bytes, Bottom 9 bits of address are used to index RAM
+                    if (eram_bank >= eram_banks) return 0xFF;
                     eram[addr & 0x1FF] = (value & 0xF);
                 }
                 else if (mbc == 3 && rtc_select_reg > 0) {
@@ -669,6 +735,7 @@ int write(u16 addr, u8 value)
                 }
                 else {
                     // "& 0x1FF" extracts the lower 13 bits, which maps the address to the array range starting from 0x0
+                    if (eram_bank >= eram_banks) return -1;
                     eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)] = value;
                 }
                 break;
@@ -690,11 +757,6 @@ int write(u16 addr, u8 value)
                 }
                 // I/O Registers
                 else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                    if (addr == 0xFF01 || addr == 0xFF02)
-                    {
-                        u8 a = 0;
-                        //printf("yo\n");
-                    }
                     switch (addr & 0xFF) {
                         case REG_DIV:
                             reg[REG_DIV] = 0;
@@ -712,17 +774,28 @@ int write(u16 addr, u8 value)
                             reg[addr & 0xFF] = value;
                             break;
                         case REG_IF:
+                            // DEBUG
                             /*
-                            bits:
-                            0: VBlank
-                            1: LCD STAT
-                            2: Timer
-                            3: Serial
-                            4: Joypad
+                            if (GET_BIT(value, 0) != GET_BIT(reg[REG_IF], 0)) {
+                                printf("interrupt requested: vblank\n");
+                            }
+                            if (GET_BIT(value, 1) != GET_BIT(reg[REG_IF], 1)) {
+                                printf("interrupt requested: stat\n");
+                            }
+                            if (GET_BIT(value, 2) != GET_BIT(reg[REG_IF], 2)) {
+                                printf("interrupt requested: timer\n");
+                            }
+                            if (GET_BIT(value, 3) != GET_BIT(reg[REG_IF], 3)) {
+                                printf("interrupt requested: serial\n");
+                            }
+                            if (GET_BIT(value, 4) != GET_BIT(reg[REG_IF], 4)) {
+                                printf("interrupt requested: joypad\n");
+                            }
                             */
-                            
                             reg[addr & 0xFF] = value;
                             break;
+                        case REG_LY: 
+                            break; // read only
 
                         default:
                             reg[addr & 0xFF] = value;   // Convert to range 0-255
@@ -732,10 +805,28 @@ int write(u16 addr, u8 value)
                 }
                 // High RAM
                 else if (addr >= MEM_HRAM && addr < MEM_IE) {
-                    hram[addr & 0x7F] = value;  // Convert to range 0-127
+                    hram[addr - MEM_HRAM] = value;  // Convert to range 0-127
                 }
                 // Interrupt Enable register (IE)
                 else {
+                    // DEBUG
+                    /*
+                    if (GET_BIT(value, 0) != GET_BIT(reg[REG_IE], 0)) {
+                        printf("interrupt %s: vblank\n", GET_BIT(value, 0) ? "enabled" : "disabled");
+                    }
+                    if (GET_BIT(value, 1) != GET_BIT(reg[REG_IE], 1)) {
+                        printf("interrupt %s: stat\n", GET_BIT(value, 1) ? "enabled" : "disabled");
+                    }
+                    if (GET_BIT(value, 2) != GET_BIT(reg[REG_IE], 2)) {
+                        printf("interrupt %s: timer\n", GET_BIT(value, 2) ? "enabled" : "disabled");
+                    }
+                    if (GET_BIT(value, 3) != GET_BIT(reg[REG_IE], 3)) {
+                        printf("interrupt %s: serial\n", GET_BIT(value, 3) ? "enabled" : "disabled");
+                    }
+                    if (GET_BIT(value, 4) != GET_BIT(reg[REG_IE], 4)) {
+                        printf("interrupt %s: joypad\n", GET_BIT(value, 4) ? "enabled" : "disabled");
+                    }
+                    */
                     reg[REG_IE] = value;
                 }
         }
@@ -743,6 +834,835 @@ int write(u16 addr, u8 value)
     return 0;
 }
 
+u8 execute_cb(u8 op) {
+    // Prefix CB
+    u8 cycles;
+    u8 t_u8;
+
+    if ((op & 0xF) == 0x6 || (op & 0xF) == 0xE) cycles = 16;
+    else cycles = 8;
+
+    switch (op)
+    {
+        case 0x00: // RLC B
+            rlc(&BC.high);
+            break;
+        case 0x01: // RLC C
+            rlc(&BC.low);
+            break;
+        case 0x02: // RLC D
+            rlc(&DE.high);
+            break;
+        case 0x03: // RLC E
+            rlc(&DE.low);
+            break;
+        case 0x04: // RLC H
+            rlc(&HL.high);
+            break;
+        case 0x05: // RLC L
+            rlc(&HL.low);
+            break;
+        case 0x06: // RLC (HL)
+            t_u8 = read(HL.full);
+            rlc(&t_u8);
+            break;
+        case 0x07: // RLC A
+            rlc(&A);
+            break;
+        case 0x08: // RRC B
+            rrc(&BC.high);
+            break;
+        case 0x09: // RRC C
+            rrc(&BC.low);
+            break;
+        case 0x0A: // RRC D
+            rrc(&DE.high);
+            break;
+        case 0x0B: // RRC E
+            rrc(&DE.low);
+            break;
+        case 0x0C: // RRC H
+            rrc(&HL.high);
+            break;
+        case 0x0D: // RRC L
+            rrc(&HL.low);
+            break;
+        case 0x0E: // RRC (HL)
+            t_u8 = read(HL.full);
+            rrc(&t_u8);
+            break;
+        case 0x0F: // RRC A
+            rrc(&A);
+            break;
+        case 0x10: // RL B
+            rl(&BC.high);
+            break;
+        case 0x11: // RL C
+            rl(&BC.low);
+            break;
+        case 0x12: // RL D
+            rl(&DE.high);
+            break;
+        case 0x13: // RL E
+            rl(&DE.low);
+            break;
+        case 0x14: // RL H
+            rl(&HL.high);
+            break;
+        case 0x15: // RL L
+            rl(&HL.low);
+            break;
+        case 0x16: // RL (HL)
+            t_u8 = read(HL.full);
+            rl(&t_u8);
+            break;
+        case 0x17: // RL A
+            rl(&A);
+            break;
+        case 0x18: // RR B
+            rr(&BC.high);
+            break;
+        case 0x19: // RR C
+            rr(&BC.low);
+            break;
+        case 0x1A: // RR D
+            rr(&DE.high);
+            break;
+        case 0x1B: // RR E
+            rr(&DE.low);
+            break;
+        case 0x1C: // RR H
+            rr(&HL.high);
+            break;
+        case 0x1D: // RR L
+            rr(&HL.low);
+            break;
+        case 0x1E: // RR (HL)
+            t_u8 = read(HL.full);
+            rr(&t_u8);
+            break;
+        case 0x1F: // RR A
+            rr(&A);
+            break;
+        case 0x20: // SLA B
+            sla(&BC.high);
+            break;
+        case 0x21: // SLA C
+            sla(&BC.low);
+            break;
+        case 0x22: // SLA D
+            sla(&DE.high);
+            break;
+        case 0x23: // SLA E
+            sla(&DE.low);
+            break;
+        case 0x24: // SLA H
+            sla(&HL.high);
+            break;
+        case 0x25: // SLA L
+            sla(&HL.low);
+            break;
+        case 0x26: // SLA (HL)
+            t_u8 = read(HL.full);
+            sla(&t_u8);
+            break;
+        case 0x27: // SLA A
+            sla(&A);
+            break;
+        case 0x28: // SRA B
+            sra(&BC.high);
+            break;
+        case 0x29: // SRA C
+            sra(&BC.low);
+            break;
+        case 0x2A: // SRA D
+            sra(&DE.high);
+            break;
+        case 0x2B: // SRA E
+            sra(&DE.low);
+            break;
+        case 0x2C: // SRA H
+            sra(&HL.high);
+            break;
+        case 0x2D: // SRA L
+            sra(&HL.low);
+            break;
+        case 0x2E: // SRA (HL)
+            t_u8 = read(HL.full);
+            sra(&t_u8);
+            break;
+        case 0x2F: // SRA A
+            sra(&A);
+            break;
+        case 0x30: // SWAP B
+            swap(&BC.high);
+            break;
+        case 0x31: // SWAP C
+            swap(&BC.low);
+            break;
+        case 0x32: // SWAP D
+            swap(&DE.high);
+            break;
+        case 0x33: // SWAP E
+            swap(&DE.low);
+            break;
+        case 0x34: // SWAP H
+            swap(&HL.high);
+            break;
+        case 0x35: // SWAP L
+            swap(&HL.low);
+            break;
+        case 0x36: // SWAP (HL)
+            t_u8 = read(HL.full);
+            swap(&t_u8);
+            break;
+        case 0x37: // SWAP A
+            swap(&A);
+            break;
+        case 0x38: // SRL B
+            srl(&BC.high);
+            break;
+        case 0x39: // SRL C
+            srl(&BC.low);
+            break;
+        case 0x3A: // SRL D
+            srl(&DE.high);
+            break;
+        case 0x3B: // SRL E
+            srl(&DE.low);
+            break;
+        case 0x3C: // SRL H
+            srl(&HL.high);
+            break;
+        case 0x3D: // SRL L
+            srl(&HL.low);
+            break;
+        case 0x3E: // SRL (HL)
+            t_u8 = read(HL.full);
+            srl(&t_u8);
+            break;
+        case 0x3F: // SRL A
+            srl(&A);
+            break;
+        case 0x40: // BIT 0,B
+            test_bit(&BC.high, 0);
+            break;
+        case 0x41: // BIT 0,C
+            test_bit(&BC.low, 0);
+            break;
+        case 0x42: // BIT 0,D
+            test_bit(&DE.high, 0);
+            break;
+        case 0x43: // BIT 0,E
+            test_bit(&DE.low, 0);
+            break;
+        case 0x44: // BIT 0,H
+            test_bit(&HL.high, 0);
+            break;
+        case 0x45: // BIT 0,L
+            test_bit(&HL.low, 0);
+            break;
+        case 0x46: // BIT 0,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 0);
+            break;
+        case 0x47: // BIT 0,A
+            test_bit(&A, 0);
+            break;
+        case 0x48: // BIT 1,B
+            test_bit(&BC.high, 1);
+            break;
+        case 0x49: // BIT 1,C
+            test_bit(&BC.low, 1);
+            break;
+        case 0x4A: // BIT 1,D
+            test_bit(&DE.high, 1);
+            break;
+        case 0x4B: // BIT 1,E
+            test_bit(&DE.low, 1);
+            break;
+        case 0x4C: // BIT 1,H
+            test_bit(&HL.high, 1);
+            break;
+        case 0x4D: // BIT 1,L
+            test_bit(&HL.low, 1);
+            break;
+        case 0x4E: // BIT 1,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 1);
+            break;
+        case 0x4F: // BIT 1,A
+            test_bit(&A, 1);
+            break;
+        case 0x50: // BIT 2,B
+            test_bit(&BC.high, 2);
+            break;
+        case 0x51: // BIT 2,C
+            test_bit(&BC.low, 2);
+            break;
+        case 0x52: // BIT 2,D
+            test_bit(&DE.high, 2);
+            break;
+        case 0x53: // BIT 2,E
+            test_bit(&DE.low, 2);
+            break;
+        case 0x54: // BIT 2,H
+            test_bit(&HL.high, 2);
+            break;
+        case 0x55: // BIT 2,L
+            test_bit(&HL.low, 2);
+            break;
+        case 0x56: // BIT 2,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 2);
+            break;
+        case 0x57: // BIT 2,A
+            test_bit(&A, 2);
+            break;
+        case 0x58: // BIT 3,B
+            test_bit(&BC.high, 3);
+            break;
+        case 0x59: // BIT 3,C
+            test_bit(&BC.low, 3);
+            break;
+        case 0x5A: // BIT 3,D
+            test_bit(&DE.high, 3);
+            break;
+        case 0x5B: // BIT 3,E
+            test_bit(&DE.low, 3);
+            break;
+        case 0x5C: // BIT 3,H
+            test_bit(&HL.high, 3);
+            break;
+        case 0x5D: // BIT 3,L
+            test_bit(&HL.low, 3);
+            break;
+        case 0x5E: // BIT 3,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 3);
+            break;
+        case 0x5F: // BIT 3,A
+            test_bit(&A, 3);
+            break;
+        case 0x60: // BIT 4,B
+            test_bit(&BC.high, 4);
+            break;
+        case 0x61: // BIT 4,C
+            test_bit(&BC.low, 4);
+            break;
+        case 0x62: // BIT 4,D
+            test_bit(&DE.high, 4);
+            break;
+        case 0x63: // BIT 4,E
+            test_bit(&DE.low, 4);
+            break;
+        case 0x64: // BIT 4,H
+            test_bit(&HL.high, 4);
+            break;
+        case 0x65: // BIT 4,L
+            test_bit(&HL.low, 4);
+            break;
+        case 0x66: // BIT 4,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 4);
+            break;
+        case 0x67: // BIT 4,A
+            test_bit(&A, 4);
+            break;
+        case 0x68: // BIT 5,B
+            test_bit(&BC.high, 5);
+            break;
+        case 0x69: // BIT 5,C
+            test_bit(&BC.low, 5);
+            break;
+        case 0x6A: // BIT 5,D
+            test_bit(&DE.high, 5);
+            break;
+        case 0x6B: // BIT 5,E
+            test_bit(&DE.low, 5);
+            break;
+        case 0x6C: // BIT 5,H
+            test_bit(&HL.high, 5);
+            break;
+        case 0x6D: // BIT 5,L
+            test_bit(&HL.low, 5);
+            break;
+        case 0x6E: // BIT 5,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 5);
+            break;
+        case 0x6F: // BIT 5,A
+            test_bit(&A, 5);
+            break;
+        case 0x70: // BIT 6,B
+            test_bit(&BC.high, 6);
+            break;
+        case 0x71: // BIT 6,C
+            test_bit(&BC.low, 6);
+            break;
+        case 0x72: // BIT 6,D
+            test_bit(&DE.high, 6);
+            break;
+        case 0x73: // BIT 6,E
+            test_bit(&DE.low, 6);
+            break;
+        case 0x74: // BIT 6,H
+            test_bit(&HL.high, 6);
+            break;
+        case 0x75: // BIT 6,L
+            test_bit(&HL.low, 6);
+            break;
+        case 0x76: // BIT 6,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 6);
+            break;
+        case 0x77: // BIT 6,A
+            test_bit(&A, 6);
+            break;
+        case 0x78: // BIT 7,B
+            test_bit(&BC.high, 7);
+            break;
+        case 0x79: // BIT 7,C
+            test_bit(&BC.low, 7);
+            break;
+        case 0x7A: // BIT 7,D
+            test_bit(&DE.high, 7);
+            break;
+        case 0x7B: // BIT 7,E
+            test_bit(&DE.low, 7);
+            break;
+        case 0x7C: // BIT 7,H
+            test_bit(&HL.high, 7);
+            break;
+        case 0x7D: // BIT 7,L
+            test_bit(&HL.low, 7);
+            break;
+        case 0x7E: // BIT 7,(HL)
+            t_u8 = read(HL.full);
+            test_bit(&t_u8, 7);
+            break;
+        case 0x7F: // BIT 7,A
+            test_bit(&A, 7);
+            break;
+        case 0x80: // RES 0,B
+            RESET_BIT(BC.high, 0);
+            break;
+        case 0x81: // RES 0,C
+            RESET_BIT(BC.low, 0);
+            break;
+        case 0x82: // RES 0,D
+            RESET_BIT(DE.high, 0);
+            break;
+        case 0x83: // RES 0,E
+            RESET_BIT(DE.low, 0);
+            break;
+        case 0x84: // RES 0,H
+            RESET_BIT(HL.high, 0);
+            break;
+        case 0x85: // RES 0,L
+            RESET_BIT(HL.low, 0);
+            break;
+        case 0x86: // RES 0,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 0);
+            write(HL.full, t_u8);
+            break;
+        case 0x87: // RES 0,A
+            RESET_BIT(A, 0);
+            break;
+        case 0x88: // RES 1,B
+            RESET_BIT(BC.high, 1);
+            break;
+        case 0x89: // RES 1,C
+            RESET_BIT(BC.low, 1);
+            break;
+        case 0x8A: // RES 1,D
+            RESET_BIT(DE.high, 1);
+            break;
+        case 0x8B: // RES 1,E
+            RESET_BIT(DE.low, 1);
+            break;
+        case 0x8C: // RES 1,H
+            RESET_BIT(HL.high, 1);
+            break;
+        case 0x8D: // RES 1,L
+            RESET_BIT(HL.low, 1);
+            break;
+        case 0x8E: // RES 1,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 1);
+            write(HL.full, t_u8);
+            break;
+        case 0x8F: // RES 1,A
+            RESET_BIT(A, 1);
+            break;
+        case 0x90: // RES 2,B
+            RESET_BIT(BC.high, 2);
+            break;
+        case 0x91: // RES 2,C
+            RESET_BIT(BC.low, 2);
+            break;
+        case 0x92: // RES 2,D
+            RESET_BIT(DE.high, 2);
+            break;
+        case 0x93: // RES 2,E
+            RESET_BIT(DE.low, 2);
+            break;
+        case 0x94: // RES 2,H
+            RESET_BIT(HL.high, 2);
+            break;
+        case 0x95: // RES 2,L
+            RESET_BIT(HL.low, 2);
+            break;
+        case 0x96: // RES 2,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 2);
+            write(HL.full, t_u8);
+            break;
+        case 0x97: // RES 2,A
+            RESET_BIT(A, 2);
+            break;
+        case 0x98: // RES 3,B
+            RESET_BIT(BC.high, 3);
+            break;
+        case 0x99: // RES 3,C
+            RESET_BIT(BC.low, 3);
+            break;
+        case 0x9A: // RES 3,D
+            RESET_BIT(DE.high, 3);
+            break;
+        case 0x9B: // RES 3,E
+            RESET_BIT(DE.low, 3);
+            break;
+        case 0x9C: // RES 3,H
+            RESET_BIT(HL.high, 3);
+            break;
+        case 0x9D: // RES 3,L
+            RESET_BIT(HL.low, 3);
+            break;
+        case 0x9E: // RES 3,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 3);
+            write(HL.full, t_u8);
+            break;
+        case 0x9F: // RES 3,A
+            RESET_BIT(A, 3);
+            break;
+        case 0xA0: // RES 4,B
+            RESET_BIT(BC.high, 4);
+            break;
+        case 0xA1: // RES 4,C
+            RESET_BIT(BC.low, 4);
+            break;
+        case 0xA2: // RES 4,D
+            RESET_BIT(DE.high, 4);
+            break;
+        case 0xA3: // RES 4,E
+            RESET_BIT(DE.low, 4);
+            break;
+        case 0xA4: // RES 4,H
+            RESET_BIT(HL.high, 4);
+            break;
+        case 0xA5: // RES 4,L
+            RESET_BIT(HL.low, 4);
+            break;
+        case 0xA6: // RES 4,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 4);
+            write(HL.full, t_u8);
+            break;
+        case 0xA7: // RES 4,A
+            RESET_BIT(A, 4);
+            break;
+        case 0xA8: // RES 5,B
+            RESET_BIT(BC.high, 5);
+            break;
+        case 0xA9: // RES 5,C
+            RESET_BIT(BC.low, 5);
+            break;
+        case 0xAA: // RES 5,D
+            RESET_BIT(DE.high, 5);
+            break;
+        case 0xAB: // RES 5,E
+            RESET_BIT(DE.low, 5);
+            break;
+        case 0xAC: // RES 5,H
+            RESET_BIT(HL.high, 5);
+            break;
+        case 0xAD: // RES 5,L
+            RESET_BIT(HL.low, 5);
+            break;
+        case 0xAE: // RES 5,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 5);
+            write(HL.full, t_u8);
+            break;
+        case 0xAF: // RES 5,A
+            RESET_BIT(A, 5);
+            break;
+        case 0xB0: // RES 6,B
+            RESET_BIT(BC.high, 6);
+            break;
+        case 0xB1: // RES 6,C
+            RESET_BIT(BC.low, 6);
+            break;
+        case 0xB2: // RES 6,D
+            RESET_BIT(DE.high, 6);
+            break;
+        case 0xB3: // RES 6,E
+            RESET_BIT(DE.low, 6);
+            break;
+        case 0xB4: // RES 6,H
+            RESET_BIT(HL.high, 6);
+            break;
+        case 0xB5: // RES 6,L
+            RESET_BIT(HL.low, 6);
+            break;
+        case 0xB6: // RES 6,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 6);
+            write(HL.full, t_u8);
+            break;
+        case 0xB7: // RES 6,A
+            RESET_BIT(A, 6);
+            break;
+        case 0xB8: // RES 7,B
+            RESET_BIT(BC.high, 7);
+            break;
+        case 0xB9: // RES 7,C
+            RESET_BIT(BC.low, 7);
+            break;
+        case 0xBA: // RES 7,D
+            RESET_BIT(DE.high, 7);
+            break;
+        case 0xBB: // RES 7,E
+            RESET_BIT(DE.low, 7);
+            break;
+        case 0xBC: // RES 7,H
+            RESET_BIT(HL.high, 7);
+            break;
+        case 0xBD: // RES 7,L
+            RESET_BIT(HL.low, 7);
+            break;
+        case 0xBE: // RES 7,(HL)
+            t_u8 = read(HL.full);
+            RESET_BIT(t_u8, 7);
+            write(HL.full, t_u8);
+            break;
+        case 0xBF: // RES 7,A
+            RESET_BIT(A, 7);
+            break;
+        case 0xC0: // SET 0,B
+            SET_BIT(BC.high, 0);
+            break;
+        case 0xC1: // SET 0,C
+            SET_BIT(BC.low, 0);
+            break;
+        case 0xC2: // SET 0,D
+            SET_BIT(DE.high, 0);
+            break;
+        case 0xC3: // SET 0,E
+            SET_BIT(DE.low, 0);
+            break;
+        case 0xC4: // SET 0,H
+            SET_BIT(HL.high, 0);
+            break;
+        case 0xC5: // SET 0,L
+            SET_BIT(HL.low, 0);
+            break;
+        case 0xC6: // SET 0,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 0);
+            write(HL.full, t_u8);
+            break;
+        case 0xC7: // SET 0,A
+            SET_BIT(A, 0);
+            break;
+        case 0xC8: // SET 1,B
+            SET_BIT(BC.high, 1);
+            break;
+        case 0xC9: // SET 1,C
+            SET_BIT(BC.low, 1);
+            break;
+        case 0xCA: // SET 1,D
+            SET_BIT(DE.high, 1);
+            break;
+        case 0xCB: // SET 1,E
+            SET_BIT(DE.low, 1);
+            break;
+        case 0xCC: // SET 1,H
+            SET_BIT(HL.high, 1);
+            break;
+        case 0xCD: // SET 1,L
+            SET_BIT(HL.low, 1);
+            break;
+        case 0xCE: // SET 1,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 1);
+            write(HL.full, t_u8);
+            break;
+        case 0xCF: // SET 1,A
+            SET_BIT(A, 1);
+            break;
+        case 0xD0: // SET 2,B
+            SET_BIT(BC.high, 2);
+            break;
+        case 0xD1: // SET 2,C
+            SET_BIT(BC.low, 2);
+            break;
+        case 0xD2: // SET 2,D
+            SET_BIT(DE.high, 2);
+            break;
+        case 0xD3: // SET 2,E
+            SET_BIT(DE.low, 2);
+            break;
+        case 0xD4: // SET 2,H
+            SET_BIT(HL.high, 2);
+            break;
+        case 0xD5: // SET 2,L
+            SET_BIT(HL.low, 2);
+            break;
+        case 0xD6: // SET 2,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 2);
+            write(HL.full, t_u8);
+            break;
+        case 0xD7: // SET 2,A
+            SET_BIT(A, 2);
+            break;
+        case 0xD8: // SET 3,B
+            SET_BIT(BC.high, 3);
+            break;
+        case 0xD9: // SET 3,C
+            SET_BIT(BC.low, 3);
+            break;
+        case 0xDA: // SET 3,D
+            SET_BIT(DE.high, 3);
+            break;
+        case 0xDB: // SET 3,E
+            SET_BIT(DE.low, 3);
+            break;
+        case 0xDC: // SET 3,H
+            SET_BIT(HL.high, 3);
+            break;
+        case 0xDD: // SET 3,L
+            SET_BIT(HL.low, 3);
+            break;
+        case 0xDE: // SET 3,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 3);
+            write(HL.full, t_u8);
+            break;
+        case 0xDF: // SET 3,A
+            SET_BIT(A, 3);
+            break;
+        case 0xE0: // SET 4,B
+            SET_BIT(BC.high, 4);
+            break;
+        case 0xE1: // SET 4,C
+            SET_BIT(BC.low, 4);
+            break;
+        case 0xE2: // SET 4,D
+            SET_BIT(DE.high, 4);
+            break;
+        case 0xE3: // SET 4,E
+            SET_BIT(DE.low, 4);
+            break;
+        case 0xE4: // SET 4,H
+            SET_BIT(HL.high, 4);
+            break;
+        case 0xE5: // SET 4,L
+            SET_BIT(HL.low, 4);
+            break;
+        case 0xE6: // SET 4,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 4);
+            write(HL.full, t_u8);
+            break;
+        case 0xE7: // SET 4,A
+            SET_BIT(A, 4);
+            break;
+        case 0xE8: // SET 5,B
+            SET_BIT(BC.high, 5);
+            break;
+        case 0xE9: // SET 5,C
+            SET_BIT(BC.low, 5);
+            break;
+        case 0xEA: // SET 5,D
+            SET_BIT(DE.high, 5);
+            break;
+        case 0xEB: // SET 5,E
+            SET_BIT(DE.low, 5);
+            break;
+        case 0xEC: // SET 5,H
+            SET_BIT(HL.high, 5);
+            break;
+        case 0xED: // SET 5,L
+            SET_BIT(HL.low, 5);
+            break;
+        case 0xEE: // SET 5,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 5);
+            write(HL.full, t_u8);
+            break;
+        case 0xEF: // SET 5,A
+            SET_BIT(A, 5);
+            break;
+        case 0xF0: // SET 6,B
+            SET_BIT(BC.high, 6);
+            break;
+        case 0xF1: // SET 6,C
+            SET_BIT(BC.low, 6);
+            break;
+        case 0xF2: // SET 6,D
+            SET_BIT(DE.high, 6);
+            break;
+        case 0xF3: // SET 6,E
+            SET_BIT(DE.low, 6);
+            break;
+        case 0xF4: // SET 6,H
+            SET_BIT(HL.high, 6);
+            break;
+        case 0xF5: // SET 6,L
+            SET_BIT(HL.low, 6);
+            break;
+        case 0xF6: // SET 6,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 6);
+            write(HL.full, t_u8);
+            break;
+        case 0xF7: // SET 6,A
+            SET_BIT(A, 6);
+            break;
+        case 0xF8: // SET 7,B
+            SET_BIT(BC.high, 7);
+            break;
+        case 0xF9: // SET 7,C
+            SET_BIT(BC.low, 7);
+            break;
+        case 0xFA: // SET 7,D
+            SET_BIT(DE.high, 7);
+            break;
+        case 0xFB: // SET 7,E
+            SET_BIT(DE.low, 7);
+            break;
+        case 0xFC: // SET 7,H
+            SET_BIT(HL.high, 7);
+            break;
+        case 0xFD: // SET 7,L
+            SET_BIT(HL.low, 7);
+            break;
+        case 0xFE: // SET 7,(HL)
+            t_u8 = read(HL.full);
+            SET_BIT(t_u8, 7);
+            write(HL.full, t_u8);
+            break;
+        case 0xFF: // SET 7,A
+            SET_BIT(A, 7);
+            break;
+    }
+    return cycles;
+}
 
 u8 execute_instruction(u8 op) {
     u8       cycles;
@@ -750,1837 +1670,1008 @@ u8 execute_instruction(u8 op) {
     u8       t_u8;
     BytePair t_u16;
 
-    if (!prefix_cb) {
-        cycles = op_cycles_lut[op];
+    cycles = op_cycles_lut[op];
 
-        switch (op) {  // [Z N H C]
-            case 0x00: // NOP
-                break;
-            case 0x01: // LD BC,d16
-                BC.low = read(PC++);
-                BC.high = read(PC++);
-                break;
-            case 0x02: // LD (BC),A
-                write(BC.full, A);
-                break;
-            case 0x03: // INC BC
-                BC.full++;
-                break;
-            case 0x04: // INC B
-                inc_u8(&BC.high);
-                break;
-            case 0x05: // DEC B
-                dec_u8(&BC.high);
-                break;
-            case 0x06: // LD B,d8
-                BC.high = read(PC++);
-                break;
-            case 0x07: // RLCA
-                F_C = GET_BIT(A, 7);
-                A = ROTATE_LEFT(A, 1, 8);
-                F_Z = 0;
-                F_N = 0;
-                F_H = 0;
-                break;
-            case 0x08: // LD (a16),SP
-                write(PC++, SP.low);
-                write(PC++, SP.high);
-                break;
-            case 0x09: // ADD HL,BC
-                add_u16(&HL.full, BC.full);
-                break;
-            case 0x0A: // LD A,(BC)
-                A = read(BC.full);
-                break;
-            case 0x0B: // DEC BC
-                BC.full--;
-                break;
-            case 0x0C: // INC C
-                inc_u8(&BC.low);
-                break;
-            case 0x0D: // DEC C
-                dec_u8(&BC.low);
-                break;
-            case 0x0E: // LD C,d8
-                BC.low = read(PC++);
-                break;
-            case 0x0F: // RRCA
-                F_C = GET_BIT(A, 0);
-                A = ROTATE_RIGHT(A, 1, 8);
-                F_Z = 0;
-                F_N = 0;
-                F_H = 0;
-                break;
-            case 0x10: // STOP 0
-                // TODO
-                break;
-            case 0x11: // LD DE,d16
-                DE.low = read(PC++);
-                DE.high = read(PC++);
-                break;
-            case 0x12: // LD (DE),A
-                write(DE.full, A);
-                break;
-            case 0x13: // INC DE
-                DE.full++;
-                break;
-            case 0x14: // INC D
-                inc_u8(&DE.high);
-                break;
-            case 0x15: // DEC D
-                dec_u8(&DE.high);
-                break;
-            case 0x16: // LD D,d8
-                DE.high = read(PC++);
-                break;
-            case 0x17: // RLA
-                t_u8 = F_C;
-                F_C = GET_BIT(A, 7);
-                A <<= 1;
-                if (t_u8) SET_BIT(A, 0);
-                F_Z = 0;
-                F_N = 0;
-                F_H = 0;
-                break;
-            case 0x18: // JR r8
-                t_s8 = (s8)(read(PC++));
+    switch (op) {  // [Z N H C]
+        case 0x00: // NOP
+            break;
+        case 0x01: // LD BC,d16
+            BC.low = read(PC++);
+            BC.high = read(PC++);
+            break;
+        case 0x02: // LD (BC),A
+            write(BC.full, A);
+            break;
+        case 0x03: // INC BC
+            BC.full++;
+            break;
+        case 0x04: // INC B
+            inc_u8(&BC.high);
+            break;
+        case 0x05: // DEC B
+            dec_u8(&BC.high);
+            break;
+        case 0x06: // LD B,d8
+            BC.high = read(PC++);
+            break;
+        case 0x07: // RLCA
+            F_C = GET_BIT(A, 7);
+            A = ROTATE_LEFT(A, 1, 8);
+            F_Z = 0;
+            F_N = 0;
+            F_H = 0;
+            break;
+        case 0x08: // LD (a16),SP
+            write(PC++, SP.low);
+            write(PC++, SP.high);
+            break;
+        case 0x09: // ADD HL,BC
+            add_u16(&HL.full, BC.full);
+            break;
+        case 0x0A: // LD A,(BC)
+            A = read(BC.full);
+            break;
+        case 0x0B: // DEC BC
+            BC.full--;
+            break;
+        case 0x0C: // INC C
+            inc_u8(&BC.low);
+            break;
+        case 0x0D: // DEC C
+            dec_u8(&BC.low);
+            break;
+        case 0x0E: // LD C,d8
+            BC.low = read(PC++);
+            break;
+        case 0x0F: // RRCA
+            F_C = GET_BIT(A, 0);
+            A = ROTATE_RIGHT(A, 1, 8);
+            F_Z = 0;
+            F_N = 0;
+            F_H = 0;
+            break;
+        case 0x10: // STOP 0
+            // TODO
+            break;
+        case 0x11: // LD DE,d16
+            DE.low = read(PC++);
+            DE.high = read(PC++);
+            break;
+        case 0x12: // LD (DE),A
+            write(DE.full, A);
+            break;
+        case 0x13: // INC DE
+            DE.full++;
+            break;
+        case 0x14: // INC D
+            inc_u8(&DE.high);
+            break;
+        case 0x15: // DEC D
+            dec_u8(&DE.high);
+            break;
+        case 0x16: // LD D,d8
+            DE.high = read(PC++);
+            break;
+        case 0x17: // RLA
+            t_u8 = F_C;
+            F_C = GET_BIT(A, 7);
+            A <<= 1;
+            if (t_u8) SET_BIT(A, 0);
+            F_Z = 0;
+            F_N = 0;
+            F_H = 0;
+            break;
+        case 0x18: // JR r8
+            t_s8 = (s8)(read(PC++));
+            PC += t_s8;
+            break;
+        case 0x19: // ADD HL,DE
+            add_u16(&HL.full, DE.full);
+            break;
+        case 0x1A: // LD A,(DE)
+            A = read(DE.full);
+            break;
+        case 0x1B: // DEC DE
+            DE.full--;
+            break;
+        case 0x1C: // INC E
+            inc_u8(&DE.low);
+            break;
+        case 0x1D: // DEC E
+            dec_u8(&DE.low);
+            break;
+        case 0x1E: // LD E,d8
+            DE.low = read(PC++);
+            break;
+        case 0x1F: // RRA
+            t_u8 = F_C;
+            F_C = GET_BIT(A, 0);
+            A >>= 1;
+            if (t_u8) SET_BIT(A, 7);
+            F_Z = 0;
+            F_N = 0;
+            F_H = 0;
+            break;
+        case 0x20: // JR NZ,r8
+            t_s8 = (s8)(read(PC++));
+            if (!F_Z) {
                 PC += t_s8;
-                break;
-            case 0x19: // ADD HL,DE
-                add_u16(&HL.full, DE.full);
-                break;
-            case 0x1A: // LD A,(DE)
-                A = read(DE.full);
-                break;
-            case 0x1B: // DEC DE
-                DE.full--;
-                break;
-            case 0x1C: // INC E
-                inc_u8(&DE.low);
-                break;
-            case 0x1D: // DEC E
-                dec_u8(&DE.low);
-                break;
-            case 0x1E: // LD E,d8
-                DE.low = read(PC++);
-                break;
-            case 0x1F: // RRA
-                t_u8 = F_C;
-                F_C = GET_BIT(A, 0);
-                A >>= 1;
-                if (t_u8) SET_BIT(A, 7);
-                F_Z = 0;
-                F_N = 0;
-                F_H = 0;
-                break;
-            case 0x20: // JR NZ,r8
-                t_s8 = (s8)(read(PC++));
-                if (!F_Z) {
-                    PC += t_s8;
-                    cycles += 4; // additional cycles if action was taken
-                }
-                break;
-            case 0x21: // LD HL,d16
-                HL.low = read(PC++);
-                HL.high = read(PC++);
-                break;
-            case 0x22: // LD (HL+),A
-                write(HL.full++, A);
-                break;
-            case 0x23: // INC HL
-                HL.full++;
-                break;
-            case 0x24: // INC H
-                inc_u8(&HL.high);
-                break;
-            case 0x25: // DEC H
-                dec_u8(&HL.high);
-                break;
-            case 0x26: // LD H,d8
-                HL.high = read(PC++);
-                break;
-            case 0x27: // DAA
-                if (F_N == 0) {
-                    // after an addition, adjust if (half-)carry occurred or if result is out of bounds
-                    if (F_C || A > 0x99) {
-                        A += 0x60; F_C = 1;
-                    } // upper nibble
-                    if (F_H || ((A & 0xF) > 0x9)) {
-                        A += 0x6;
-                    }  // lower nibble
-                }
-                else {
-                    // after a subtraction, only adjust if (half-)carry occurred
-                    if (F_C) A -= 0x60; // upper nibble
-                    if (F_H) A -= 0x6;  // lower nibble
-                }
-                F_Z = (A == 0);
-                F_H = 0;
-                break;
-            case 0x28: // JR Z,r8
-                t_s8 = (s8)read(PC++);
-                if (F_Z) {
-                    PC += t_s8;
-                    cycles += 4; // additional cycles if action was taken
-                }
-                break;
-            case 0x29: // ADD HL,HL
-                add_u16(&HL.full, HL.full);
-                break;
-            case 0x2A: // LD A,(HL+)
-                A = read(HL.full++);
-                break;
-            case 0x2B: // DEC HL
-                HL.full--;
-                break;
-            case 0x2C: // INC L
-                inc_u8(&HL.low);
-                break;
-            case 0x2D: // DEC L
-                dec_u8(&HL.low);
-                break;
-            case 0x2E: // LD L,d8
-                HL.low = read(PC++);
-                break;
-            case 0x2F: // CPL
-                A ^= 0xFF; // flip bits
-                F_N = 1;
-                F_H = 1;
-                break;
-            case 0x30: // JR NC,r8
-                t_s8 = (s8)read(PC++);
-                if (!F_C) {
-                    PC += t_s8;
-                    cycles += 4;
-                }
-                break;
-            case 0x31: // LD SP,d16
-                SP.low = read(PC++);
-                SP.high = read(PC++);
-                break;
-            case 0x32: // LD (HL-),A
-                write(HL.full--, A);
-                break;
-            case 0x33: // INC SP
-                SP.full++;
-                break;
-            case 0x34: // INC (HL)
-                t_u8 = read(HL.full);
-                inc_u8(&t_u8);
-                write(HL.full, t_u8);
-                break;
-            case 0x35: // DEC (HL)
-                t_u8 = read(HL.full);
-                dec_u8(&t_u8);
-                write(HL.full, t_u8);
-                break;
-            case 0x36: // LD (HL),d8
-                write(HL.full, read(PC++));
-                break;
-            case 0x37: // SCF
-                F_C = 1;
-                F_H = 0;
-                F_N = 0;
-                break;
-            case 0x38: // JR C,r8
-                t_s8 = (s8)read(PC++);
-                if (F_C) {
-                    PC += t_s8;
-                    cycles += 4; // additional cycles if action was taken
-                }
-                break;
-            case 0x39: // ADD HL,SP
-                add_u16(&HL.full, SP.full);
-                break;
-            case 0x3A: // LD A,(HL-)
-                A = read(HL.full--);
-                break;
-            case 0x3B: // DEC SP
-                SP.full--;
-                break;
-            case 0x3C: // INC A
-                inc_u8(&A);
-                break;
-            case 0x3D: // DEC A
-                dec_u8(&A);
-                break;
-            case 0x3E: // LD A,d8
-                A = read(PC++);
-                break;
-            case 0x3F: // CCF
-                F_C ^= 1;
-                F_H = 0;
-                F_N = 0;
-                break;
-            case 0x40: // LD B,B
-                // BC.high = BC.high;
-                break;
-            case 0x41: // LD B,C
-                BC.high = BC.low;
-                break;
-            case 0x42: // LD B,D
-                BC.high = DE.high;
-                break;
-            case 0x43: // LD B,E
-                BC.high = DE.low;
-                break;
-            case 0x44: // LD B,H
-                BC.high = HL.high;
-                break;
-            case 0x45: // LD B,L
-                BC.high = HL.low;
-                break;
-            case 0x46: // LD B,(HL)
-                BC.high = read(HL.full);
-                break;
-            case 0x47: // LD B,A
-                BC.high = A;
-                break;
-            case 0x48: // LD C,B
-                BC.low = BC.high;
-                break;
-            case 0x49: // LD C,C
-                // BC.low = BC.low;
-                break;
-            case 0x4A: // LD C,D
-                BC.low = DE.high;
-                break;
-            case 0x4B: // LD C,E
-                BC.low = DE.low;
-                break;
-            case 0x4C: // LD C,H
-                BC.low = HL.high;
-                break;
-            case 0x4D: // LD C,L
-                BC.low = HL.low;
-                break;
-            case 0x4E: // LD C,(HL)
-                BC.low = read(HL.full);
-                break;
-            case 0x4F: // LD C,A
-                BC.low = A;
-                break;
-            case 0x50: // LD D,B
-                DE.high = BC.high;
-                break;
-            case 0x51: // LD D,C
-                DE.high = BC.low;
-                break;
-            case 0x52: // LD D,D
-                // DE.high = DE.high;
-                break;
-            case 0x53: // LD D,E
-                DE.high = DE.low;
-                break;
-            case 0x54: // LD D,H
-                DE.high = HL.high;
-                break;
-            case 0x55: // LD D,L
-                DE.high = HL.low;
-                break;
-            case 0x56: // LD D,(HL)
-                DE.high = read(HL.full);
-                break;
-            case 0x57: // LD D,A
-                DE.high = A;
-                break;
-            case 0x58: // LD E,B
-                DE.low = BC.high;
-                break;
-            case 0x59: // LD E,C
-                DE.low = BC.low;
-                break;
-            case 0x5A: // LD E,D
-                DE.low = DE.high;
-                break;
-            case 0x5B: // LD E,E
-                //DE.low = DE.low;
-                break;
-            case 0x5C: // LD E,H
-                DE.low = HL.high;
-                break;
-            case 0x5D: // LD E,L
-                DE.low = HL.low;
-                break;
-            case 0x5E: // LD E,(HL)
-                DE.low = read(HL.full);
-                break;
-            case 0x5F: // LD E,A
-                DE.low = A;
-                break;
-            case 0x60: // LD H,B
-                HL.high = BC.high;
-                break;
-            case 0x61: // LD H,C
-                HL.high = BC.low;
-                break;
-            case 0x62: // LD H,D
-                HL.high = DE.high;
-                break;
-            case 0x63: // LD H,E
-                HL.high = DE.low;
-                break;
-            case 0x64: // LD H,H
-                //HL.high = HL.high;
-                break;
-            case 0x65: // LD H,L
-                HL.high = HL.low;
-                break;
-            case 0x66: // LD H,(HL)
-                HL.high = read(HL.full);
-                break;
-            case 0x67: // LD H,A
-                HL.high = A;
-                break;
-            case 0x68: // LD L,B
-                HL.low = BC.high;
-                break;
-            case 0x69: // LD L,C
-                HL.low = BC.low;
-                break;
-            case 0x6A: // LD L,D
-                HL.low = DE.high;
-                break;
-            case 0x6B: // LD L,E
-                HL.low = DE.low;
-                break;
-            case 0x6C: // LD L,H
-                HL.low = HL.high;
-                break;
-            case 0x6D: // LD L,L
-                //HL.low = HL.low;
-                break;
-            case 0x6E: // LD L,(HL)
-                HL.low = read(HL.full);
-                break;
-            case 0x6F: // LD L,A
-                HL.low = A;
-                break;
-            case 0x70: // LD (HL),B
-                write(HL.full, BC.high);
-                break;
-            case 0x71: // LD (HL),C
-                write(HL.full, BC.low);
-                break;
-            case 0x72: // LD (HL),D
-                write(HL.full, DE.high);
-                break;
-            case 0x73: // LD (HL),E
-                write(HL.full, DE.low);
-                break;
-            case 0x74: // LD (HL),H
-                write(HL.full, HL.high);
-                break;
-            case 0x75: // LD (HL),L
-                write(HL.full, HL.low);
-                break;
-            case 0x76: // HALT
-                // TODO
-                break;
-            case 0x77: // LD (HL),A
-                write(HL.full, A);
-                break;
-            case 0x78: // LD A,B
-                A = BC.high;
-                break;
-            case 0x79: // LD A,C
-                A = BC.low;
-                break;
-            case 0x7A: // LD A,D
-                A = DE.high;
-                break;
-            case 0x7B: // LD A,E
-                A = DE.low;
-                break;
-            case 0x7C: // LD A,H
-                A = HL.high;
-                break;
-            case 0x7D: // LD A,L
-                A = HL.low;
-                break;
-            case 0x7E: // LD A,(HL)
-                A = read(HL.full);
-                break;
-            case 0x7F: // LD A,A
-                //A = A;
-                break;
-            case 0x80: // ADD A,B
-                add_u8(&A, BC.high);
-                break;
-            case 0x81: // ADD A,C
-                add_u8(&A, BC.low);
-                break;
-            case 0x82: // ADD A,D
-                add_u8(&A, DE.high);
-                break;
-            case 0x83: // ADD A,E
-                add_u8(&A, DE.low);
-                break;
-            case 0x84: // ADD A,H
-                add_u8(&A, HL.high);
-                break;
-            case 0x85: // ADD A,L
-                add_u8(&A, HL.low);
-                break;
-            case 0x86: // ADD A,(HL)
-                add_u8(&A, read(HL.full));
-                break;
-            case 0x87: // ADD A,A
-                add_u8(&A, A);
-                break;
-            case 0x88: // ADC A,B
-                add_u8(&A, BC.high + F_C);
-                break;
-            case 0x89: // ADC A,C
-                add_u8(&A, BC.low + F_C);
-                break;
-            case 0x8A: // ADC A,D
-                add_u8(&A, DE.high + F_C);
-                break;
-            case 0x8B: // ADC A,E
-                add_u8(&A, DE.low + F_C);
-                break;
-            case 0x8C: // ADC A,H
-                add_u8(&A, HL.high + F_C);
-                break;
-            case 0x8D: // ADC A,L
-                add_u8(&A, HL.low + F_C);
-                break;
-            case 0x8E: // ADC A,(HL)
-                add_u8(&A, read(HL.full));
-                break;
-            case 0x8F: // ADD A,A
-                add_u8(&A, A);
-                A += F_C;
-                break;
-            case 0x90: // SUB B
-                sub_u8(BC.high);
-                break;
-            case 0x91: // SUB C
-                sub_u8(BC.low);
-                break;
-            case 0x92: // SUB D
-                sub_u8(DE.high);
-                break;
-            case 0x93: // SUB E
-                sub_u8(DE.low);
-                break;
-            case 0x94: // SUB H
-                sub_u8(HL.high);
-                break;
-            case 0x95: // SUB L
-                sub_u8(HL.low);
-                break;
-            case 0x96: // SUB (HL)
-                sub_u8(read(HL.full));
-                break;
-            case 0x97: // SUB A
-                sub_u8(A);
-                break;
-            case 0x98: // SBC B
-                sub_u8(BC.high - F_C);
-                break;
-            case 0x99: // SBC C
-                sub_u8(BC.low - F_C);
-                break;
-            case 0x9A: // SBC D
-                sub_u8(DE.high - F_C);
-                break;
-            case 0x9B: // SBC E
-                sub_u8(DE.low - F_C);
-                break;
-            case 0x9C: // SBC H
-                sub_u8(HL.high - F_C);
-                break;
-            case 0x9D: // SBC L
-                sub_u8(HL.low - F_C);
-                break;
-            case 0x9E: // SBC (HL)
-                sub_u8(read(HL.full) - F_C);
-                break;
-            case 0x9F: // SBC A
-                sub_u8(A - F_C);
-                break;
-            case 0xA0: // AND B
-                and_u8(BC.high);
-                break;
-            case 0xA1: // AND C
-                and_u8(BC.low);
-                break;
-            case 0xA2: // AND D
-                and_u8(DE.high);
-                break;
-            case 0xA3: // AND E
-                and_u8(DE.low);
-                break;
-            case 0xA4: // AND H
-                and_u8(HL.high);
-                break;
-            case 0xA5: // AND L
-                and_u8(HL.low);
-                break;
-            case 0xA6: // AND (HL)
-                and_u8(read(HL.full));
-                break;
-            case 0xA7: // AND A
-                and_u8(A);
-                break;
-            case 0xA8: // XOR B
-                xor_u8(BC.high);
-                break;
-            case 0xA9: // XOR C
-                xor_u8(BC.low);
-                break;
-            case 0xAA: // XOR D
-                xor_u8(DE.high);
-                break;
-            case 0xAB: // XOR E
-                xor_u8(DE.low);
-                break;
-            case 0xAC: // XOR H
-                xor_u8(HL.high);
-                break;
-            case 0xAD: // XOR L
-                xor_u8(HL.low);
-                break;
-            case 0xAE: // XOR (HL)
-                xor_u8(read(HL.full));
-                break;
-            case 0xAF: // XOR A
-                xor_u8(A);
-                break;
-            case 0xB0: // OR B
-                or_u8(BC.high);
-                break;
-            case 0xB1: // OR C
-                or_u8(BC.low);
-                break;
-            case 0xB2: // OR D
-                or_u8(DE.high);
-                break;
-            case 0xB3: // OR E
-                or_u8(DE.low);
-                break;
-            case 0xB4: // OR H
-                or_u8(HL.high);
-                break;
-            case 0xB5: // OR L
-                or_u8(HL.low);
-                break;
-            case 0xB6: // OR (HL)
-                or_u8(read(HL.full));
-                break;
-            case 0xB7: // OR A
-                or_u8(A);
-                break;
-            case 0xB8: // CP B
-                cp_u8(BC.high);
-                break;
-            case 0xB9: // CP C
-                cp_u8(BC.low);
-                break;
-            case 0xBA: // CP D
-                cp_u8(DE.high);
-                break;
-            case 0xBB: // CP E
-                cp_u8(DE.low);
-                break;
-            case 0xBC: // CP H
-                cp_u8(HL.high);
-                break;
-            case 0xBD: // CP L
-                cp_u8(HL.low);
-                break;
-            case 0xBE: // CP (HL)
-                cp_u8(read(HL.full));
-                break;
-            case 0xBF: // CP A
-                cp_u8(A);
-                break;
-            case 0xC0: // RET NZ
-                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                if (!F_Z) {
-                    t_u16.low = read(SP.full++);
-                    t_u16.high = read(SP.full++);
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xC1: // POP BC
-                BC.low = read(SP.full++);
-                BC.high = read(SP.full++);
-                break;
-            case 0xC2: // JP NZ,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (!F_Z) {
-                    PC = t_u16.full;
-                    cycles += 4;
-                }
-                break;
-            case 0xC3: // JP a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                PC = t_u16.full;
-                break;
-            case 0xC4: // CALL NZ,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (!F_Z) {
-                    // push PC onto stack, then jump to address
-                    write(--SP.full, (PC >> 8) & 0xFF);
-                    write(--SP.full, (PC & 0xFF));
-                    // jump to a16
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xC5: // PUSH BC
-                write(--SP.full, BC.high);
-                write(--SP.full, BC.low);
-                break;
-            case 0xC6: // ADD A,d8
-                add_u8(&A, read(PC++));
-                break;
-            case 0xC7: // RST 00H
-                // push PC onto stack, then jump to address
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
-                PC = 0x0000;
-                break;
-            case 0xC8: // RET Z
-                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                if (F_Z) {
-                    t_u16.low = read(SP.full++);
-                    t_u16.high = read(SP.full++);
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xC9: // RET
+                cycles += 4; // additional cycles if action was taken
+            }
+            break;
+        case 0x21: // LD HL,d16
+            HL.low = read(PC++);
+            HL.high = read(PC++);
+            break;
+        case 0x22: // LD (HL+),A
+            write(HL.full++, A);
+            break;
+        case 0x23: // INC HL
+            HL.full++;
+            break;
+        case 0x24: // INC H
+            inc_u8(&HL.high);
+            break;
+        case 0x25: // DEC H
+            dec_u8(&HL.high);
+            break;
+        case 0x26: // LD H,d8
+            HL.high = read(PC++);
+            break;
+        case 0x27: // DAA
+            if (F_N == 0) {
+                // after an addition, adjust if (half-)carry occurred or if result is out of bounds
+                if (F_C || A > 0x99) {
+                    A += 0x60; F_C = 1;
+                } // upper nibble
+                if (F_H || ((A & 0xF) > 0x9)) {
+                    A += 0x6;
+                }  // lower nibble
+            }
+            else {
+                // after a subtraction, only adjust if (half-)carry occurred
+                if (F_C) A -= 0x60; // upper nibble
+                if (F_H) A -= 0x6;  // lower nibble
+            }
+            F_Z = (A == 0);
+            F_H = 0;
+            break;
+        case 0x28: // JR Z,r8
+            t_s8 = (s8)read(PC++);
+            if (F_Z) {
+                PC += t_s8;
+                cycles += 4; // additional cycles if action was taken
+            }
+            break;
+        case 0x29: // ADD HL,HL
+            add_u16(&HL.full, HL.full);
+            break;
+        case 0x2A: // LD A,(HL+)
+            A = read(HL.full++);
+            break;
+        case 0x2B: // DEC HL
+            HL.full--;
+            break;
+        case 0x2C: // INC L
+            inc_u8(&HL.low);
+            break;
+        case 0x2D: // DEC L
+            dec_u8(&HL.low);
+            break;
+        case 0x2E: // LD L,d8
+            HL.low = read(PC++);
+            break;
+        case 0x2F: // CPL
+            A ^= 0xFF; // flip bits
+            F_N = 1;
+            F_H = 1;
+            break;
+        case 0x30: // JR NC,r8
+            t_s8 = (s8)read(PC++);
+            if (!F_C) {
+                PC += t_s8;
+                cycles += 4;
+            }
+            break;
+        case 0x31: // LD SP,d16
+            SP.low = read(PC++);
+            SP.high = read(PC++);
+            break;
+        case 0x32: // LD (HL-),A
+            write(HL.full--, A);
+            break;
+        case 0x33: // INC SP
+            SP.full++;
+            break;
+        case 0x34: // INC (HL)
+            t_u8 = read(HL.full);
+            inc_u8(&t_u8);
+            write(HL.full, t_u8);
+            break;
+        case 0x35: // DEC (HL)
+            t_u8 = read(HL.full);
+            dec_u8(&t_u8);
+            write(HL.full, t_u8);
+            break;
+        case 0x36: // LD (HL),d8
+            write(HL.full, read(PC++));
+            break;
+        case 0x37: // SCF
+            F_C = 1;
+            F_H = 0;
+            F_N = 0;
+            break;
+        case 0x38: // JR C,r8
+            t_s8 = (s8)read(PC++);
+            if (F_C) {
+                PC += t_s8;
+                cycles += 4; // additional cycles if action was taken
+            }
+            break;
+        case 0x39: // ADD HL,SP
+            add_u16(&HL.full, SP.full);
+            break;
+        case 0x3A: // LD A,(HL-)
+            A = read(HL.full--);
+            break;
+        case 0x3B: // DEC SP
+            SP.full--;
+            break;
+        case 0x3C: // INC A
+            inc_u8(&A);
+            break;
+        case 0x3D: // DEC A
+            dec_u8(&A);
+            break;
+        case 0x3E: // LD A,d8
+            A = read(PC++);
+            break;
+        case 0x3F: // CCF
+            F_C ^= 1;
+            F_H = 0;
+            F_N = 0;
+            break;
+        case 0x40: // LD B,B
+            // BC.high = BC.high;
+            break;
+        case 0x41: // LD B,C
+            BC.high = BC.low;
+            break;
+        case 0x42: // LD B,D
+            BC.high = DE.high;
+            break;
+        case 0x43: // LD B,E
+            BC.high = DE.low;
+            break;
+        case 0x44: // LD B,H
+            BC.high = HL.high;
+            break;
+        case 0x45: // LD B,L
+            BC.high = HL.low;
+            break;
+        case 0x46: // LD B,(HL)
+            BC.high = read(HL.full);
+            break;
+        case 0x47: // LD B,A
+            BC.high = A;
+            break;
+        case 0x48: // LD C,B
+            BC.low = BC.high;
+            break;
+        case 0x49: // LD C,C
+            // BC.low = BC.low;
+            break;
+        case 0x4A: // LD C,D
+            BC.low = DE.high;
+            break;
+        case 0x4B: // LD C,E
+            BC.low = DE.low;
+            break;
+        case 0x4C: // LD C,H
+            BC.low = HL.high;
+            break;
+        case 0x4D: // LD C,L
+            BC.low = HL.low;
+            break;
+        case 0x4E: // LD C,(HL)
+            BC.low = read(HL.full);
+            break;
+        case 0x4F: // LD C,A
+            BC.low = A;
+            break;
+        case 0x50: // LD D,B
+            DE.high = BC.high;
+            break;
+        case 0x51: // LD D,C
+            DE.high = BC.low;
+            break;
+        case 0x52: // LD D,D
+            // DE.high = DE.high;
+            break;
+        case 0x53: // LD D,E
+            DE.high = DE.low;
+            break;
+        case 0x54: // LD D,H
+            DE.high = HL.high;
+            break;
+        case 0x55: // LD D,L
+            DE.high = HL.low;
+            break;
+        case 0x56: // LD D,(HL)
+            DE.high = read(HL.full);
+            break;
+        case 0x57: // LD D,A
+            DE.high = A;
+            break;
+        case 0x58: // LD E,B
+            DE.low = BC.high;
+            break;
+        case 0x59: // LD E,C
+            DE.low = BC.low;
+            break;
+        case 0x5A: // LD E,D
+            DE.low = DE.high;
+            break;
+        case 0x5B: // LD E,E
+            //DE.low = DE.low;
+            break;
+        case 0x5C: // LD E,H
+            DE.low = HL.high;
+            break;
+        case 0x5D: // LD E,L
+            DE.low = HL.low;
+            break;
+        case 0x5E: // LD E,(HL)
+            DE.low = read(HL.full);
+            break;
+        case 0x5F: // LD E,A
+            DE.low = A;
+            break;
+        case 0x60: // LD H,B
+            HL.high = BC.high;
+            break;
+        case 0x61: // LD H,C
+            HL.high = BC.low;
+            break;
+        case 0x62: // LD H,D
+            HL.high = DE.high;
+            break;
+        case 0x63: // LD H,E
+            HL.high = DE.low;
+            break;
+        case 0x64: // LD H,H
+            //HL.high = HL.high;
+            break;
+        case 0x65: // LD H,L
+            HL.high = HL.low;
+            break;
+        case 0x66: // LD H,(HL)
+            HL.high = read(HL.full);
+            break;
+        case 0x67: // LD H,A
+            HL.high = A;
+            break;
+        case 0x68: // LD L,B
+            HL.low = BC.high;
+            break;
+        case 0x69: // LD L,C
+            HL.low = BC.low;
+            break;
+        case 0x6A: // LD L,D
+            HL.low = DE.high;
+            break;
+        case 0x6B: // LD L,E
+            HL.low = DE.low;
+            break;
+        case 0x6C: // LD L,H
+            HL.low = HL.high;
+            break;
+        case 0x6D: // LD L,L
+            //HL.low = HL.low;
+            break;
+        case 0x6E: // LD L,(HL)
+            HL.low = read(HL.full);
+            break;
+        case 0x6F: // LD L,A
+            HL.low = A;
+            break;
+        case 0x70: // LD (HL),B
+            write(HL.full, BC.high);
+            break;
+        case 0x71: // LD (HL),C
+            write(HL.full, BC.low);
+            break;
+        case 0x72: // LD (HL),D
+            write(HL.full, DE.high);
+            break;
+        case 0x73: // LD (HL),E
+            write(HL.full, DE.low);
+            break;
+        case 0x74: // LD (HL),H
+            write(HL.full, HL.high);
+            break;
+        case 0x75: // LD (HL),L
+            write(HL.full, HL.low);
+            break;
+        case 0x76: // HALT
+            halted = 1;
+            printf("CPU halted\n");
+            break;
+        case 0x77: // LD (HL),A
+            write(HL.full, A);
+            break;
+        case 0x78: // LD A,B
+            A = BC.high;
+            break;
+        case 0x79: // LD A,C
+            A = BC.low;
+            break;
+        case 0x7A: // LD A,D
+            A = DE.high;
+            break;
+        case 0x7B: // LD A,E
+            A = DE.low;
+            break;
+        case 0x7C: // LD A,H
+            A = HL.high;
+            break;
+        case 0x7D: // LD A,L
+            A = HL.low;
+            break;
+        case 0x7E: // LD A,(HL)
+            A = read(HL.full);
+            break;
+        case 0x7F: // LD A,A
+            //A = A;
+            break;
+        case 0x80: // ADD A,B
+            add_u8(&A, BC.high);
+            break;
+        case 0x81: // ADD A,C
+            add_u8(&A, BC.low);
+            break;
+        case 0x82: // ADD A,D
+            add_u8(&A, DE.high);
+            break;
+        case 0x83: // ADD A,E
+            add_u8(&A, DE.low);
+            break;
+        case 0x84: // ADD A,H
+            add_u8(&A, HL.high);
+            break;
+        case 0x85: // ADD A,L
+            add_u8(&A, HL.low);
+            break;
+        case 0x86: // ADD A,(HL)
+            add_u8(&A, read(HL.full));
+            break;
+        case 0x87: // ADD A,A
+            add_u8(&A, A);
+            break;
+        case 0x88: // ADC A,B
+            adc_u8(&A, BC.high);
+            break;
+        case 0x89: // ADC A,C
+            adc_u8(&A, BC.low);
+            break;
+        case 0x8A: // ADC A,D
+            adc_u8(&A, DE.high);
+            break;
+        case 0x8B: // ADC A,E
+            adc_u8(&A, DE.low);
+            break;
+        case 0x8C: // ADC A,H
+            adc_u8(&A, HL.high);
+            break;
+        case 0x8D: // ADC A,L
+            adc_u8(&A, HL.low);
+            break;
+        case 0x8E: // ADC A,(HL)
+            adc_u8(&A, read(HL.full));
+            break;
+        case 0x8F: // ADC A,A
+            adc_u8(&A, A);
+            break;
+        case 0x90: // SUB B
+            sub_u8(BC.high);
+            break;
+        case 0x91: // SUB C
+            sub_u8(BC.low);
+            break;
+        case 0x92: // SUB D
+            sub_u8(DE.high);
+            break;
+        case 0x93: // SUB E
+            sub_u8(DE.low);
+            break;
+        case 0x94: // SUB H
+            sub_u8(HL.high);
+            break;
+        case 0x95: // SUB L
+            sub_u8(HL.low);
+            break;
+        case 0x96: // SUB (HL)
+            sub_u8(read(HL.full));
+            break;
+        case 0x97: // SUB A
+            sub_u8(A);
+            break;
+        case 0x98: // SBC B
+            sbc_u8(BC.high);
+            break;
+        case 0x99: // SBC C
+            sbc_u8(BC.low);
+            break;
+        case 0x9A: // SBC D
+            sbc_u8(DE.high);
+            break;
+        case 0x9B: // SBC E
+            sbc_u8(DE.low);
+            break;
+        case 0x9C: // SBC H
+            sbc_u8(HL.high);
+            break;
+        case 0x9D: // SBC L
+            sbc_u8(HL.low);
+            break;
+        case 0x9E: // SBC (HL)
+            sbc_u8(read(HL.full));
+            break;
+        case 0x9F: // SBC A
+            sbc_u8(A);
+            break;
+        case 0xA0: // AND B
+            and_u8(BC.high);
+            break;
+        case 0xA1: // AND C
+            and_u8(BC.low);
+            break;
+        case 0xA2: // AND D
+            and_u8(DE.high);
+            break;
+        case 0xA3: // AND E
+            and_u8(DE.low);
+            break;
+        case 0xA4: // AND H
+            and_u8(HL.high);
+            break;
+        case 0xA5: // AND L
+            and_u8(HL.low);
+            break;
+        case 0xA6: // AND (HL)
+            and_u8(read(HL.full));
+            break;
+        case 0xA7: // AND A
+            and_u8(A);
+            break;
+        case 0xA8: // XOR B
+            xor_u8(BC.high);
+            break;
+        case 0xA9: // XOR C
+            xor_u8(BC.low);
+            break;
+        case 0xAA: // XOR D
+            xor_u8(DE.high);
+            break;
+        case 0xAB: // XOR E
+            xor_u8(DE.low);
+            break;
+        case 0xAC: // XOR H
+            xor_u8(HL.high);
+            break;
+        case 0xAD: // XOR L
+            xor_u8(HL.low);
+            break;
+        case 0xAE: // XOR (HL)
+            xor_u8(read(HL.full));
+            break;
+        case 0xAF: // XOR A
+            xor_u8(A);
+            break;
+        case 0xB0: // OR B
+            or_u8(BC.high);
+            break;
+        case 0xB1: // OR C
+            or_u8(BC.low);
+            break;
+        case 0xB2: // OR D
+            or_u8(DE.high);
+            break;
+        case 0xB3: // OR E
+            or_u8(DE.low);
+            break;
+        case 0xB4: // OR H
+            or_u8(HL.high);
+            break;
+        case 0xB5: // OR L
+            or_u8(HL.low);
+            break;
+        case 0xB6: // OR (HL)
+            or_u8(read(HL.full));
+            break;
+        case 0xB7: // OR A
+            or_u8(A);
+            break;
+        case 0xB8: // CP B
+            cp_u8(BC.high);
+            break;
+        case 0xB9: // CP C
+            cp_u8(BC.low);
+            break;
+        case 0xBA: // CP D
+            cp_u8(DE.high);
+            break;
+        case 0xBB: // CP E
+            cp_u8(DE.low);
+            break;
+        case 0xBC: // CP H
+            cp_u8(HL.high);
+            break;
+        case 0xBD: // CP L
+            cp_u8(HL.low);
+            break;
+        case 0xBE: // CP (HL)
+            cp_u8(read(HL.full));
+            break;
+        case 0xBF: // CP A
+            cp_u8(A);
+            break;
+        case 0xC0: // RET NZ
+            // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+            if (!F_Z) {
                 t_u16.low = read(SP.full++);
                 t_u16.high = read(SP.full++);
                 PC = t_u16.full;
-                break;
-            case 0xCA: // JP Z,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (F_Z) {
-                    PC = t_u16.full;
-                    cycles += 4;
-                }
-                break;
-            case 0xCB: // Prefix CB
-                prefix_cb = 1;
-                break;
-            case 0xCC: // CALL Z,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (F_Z) {
-                    // push PC onto stack, then jump to address
-                    write(--SP.full, (PC >> 8) & 0xFF);
-                    write(--SP.full, (PC & 0xFF));
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xCD: // CALL a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                // push PC onto stack, then jump to address
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
+                cycles += 12;
+            }
+            break;
+        case 0xC1: // POP BC
+            BC.low = read(SP.full++);
+            BC.high = read(SP.full++);
+            break;
+        case 0xC2: // JP NZ,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (!F_Z) {
                 PC = t_u16.full;
-                break;
-            case 0xCE: // ADC A,d8
-                add_u8(&A, read(PC++) + F_C);
-                break;
-            case 0xCF: // RST 08H
+                cycles += 4;
+            }
+            break;
+        case 0xC3: // JP a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            PC = t_u16.full;
+            break;
+        case 0xC4: // CALL NZ,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (!F_Z) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
-                PC = 0x0008;
-                break;
-
-            case 0xD0: // RET NC
-                if (!F_C) {
-                    // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                    t_u16.low = read(SP.full++);
-                    t_u16.high = read(SP.full++);
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xD1: // POP DE
-                DE.low = read(SP.full++);
-                DE.high = read(SP.full++);
-                break;
-            case 0xD2: // JP NC,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (!F_C) {
-                    PC = t_u16.full;
-                    cycles += 4;
-                }
-                break;
-            case 0xD3:
-                // nothing here
-                break;
-            case 0xD4: // CALL NC,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (!F_C) {
-                    // push PC onto stack, then jump to address
-                    write(--SP.full, (PC >> 8) & 0xFF);
-                    write(--SP.full, (PC & 0xFF));
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xD5: // PUSH DE
-                write(--SP.full, DE.high);
-                write(--SP.full, DE.low);
-                break;
-            case 0xD6: // SUB d8
-                sub_u8(read(PC++));
-                break;
-            case 0xD7: // RST 10H
-                // push PC onto stack, then jump to address
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
-                PC = 0x0010;
-                break;
-            case 0xD8: // RET C
-                if (F_C) {
-                    // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-                    t_u16.low = read(SP.full++);
-                    t_u16.high = read(SP.full++);
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xD9: // RETI
+                // jump to a16
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xC5: // PUSH BC
+            write(--SP.full, BC.high);
+            write(--SP.full, BC.low);
+            break;
+        case 0xC6: // ADD A,d8
+            add_u8(&A, read(PC++));
+            break;
+        case 0xC7: // RST 00H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0000;
+            break;
+        case 0xC8: // RET Z
+            // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+            if (F_Z) {
                 t_u16.low = read(SP.full++);
                 t_u16.high = read(SP.full++);
                 PC = t_u16.full;
-                interrupts_enabled = 1;
-                break;
-            case 0xDA: // JP C,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (F_C) {
-                    PC = t_u16.full;
-                    cycles += 4;
-                }
-                break;
-            case 0xDB:
-                // nothing here
-                break;
-            case 0xDC: // CALL C,a16
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                if (F_C) {
-                    // push PC onto stack, then jump to address
-                    write(--SP.full, (PC >> 8) & 0xFF);
-                    write(--SP.full, (PC & 0xFF));
-                    PC = t_u16.full;
-                    cycles += 12;
-                }
-                break;
-            case 0xDD:
-                // nothing here
-                break;
-            case 0xDE: // SBC A,d8
-                sub_u8(read(PC++) - F_C);
-                break;
-            case 0xDF: // RST 18H
+                cycles += 12;
+            }
+            break;
+        case 0xC9: // RET
+            t_u16.low = read(SP.full++);
+            t_u16.high = read(SP.full++);
+            PC = t_u16.full;
+            break;
+        case 0xCA: // JP Z,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (F_Z) {
+                PC = t_u16.full;
+                cycles += 4;
+            }
+            break;
+        case 0xCB: // Prefix CB
+            cycles = execute_cb(read(PC++));
+            break;
+        case 0xCC: // CALL Z,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (F_Z) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
-                PC = 0x0018;
-                break;
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xCD: // CALL a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = t_u16.full;
+            break;
+        case 0xCE: // ADC A,d8
+            adc_u8(&A, read(PC++));
+            break;
+        case 0xCF: // RST 08H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0008;
+            break;
 
-            case 0xE0: // LDH (a8),A
-                // Put A into memory address 0xFF00+n (IO)
-                write(MEM_IO + read(PC++), A);
-                break;
-            case 0xE1: // POP HL
-                HL.low = read(SP.full++);
-                HL.high = read(SP.full++);
-                break;
-            case 0xE2: // LD (C),A
-                // Put A into memory address 0xFF00+C (IO)
-                write(MEM_IO + BC.low, A);
-                break;
-            case 0xE3:
-                // nothing here
-                break;
-            case 0xE4:
-                // nothing here
-                break;
-            case 0xE5: // PUSH HL
-                write(--SP.full, HL.high);
-                write(--SP.full, HL.low);
-                break;
-            case 0xE6: // AND d8
-                and_u8(read(PC++));
-                break;
-            case 0xE7: // RST 20H
+        case 0xD0: // RET NC
+            if (!F_C) {
+                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                t_u16.low = read(SP.full++);
+                t_u16.high = read(SP.full++);
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xD1: // POP DE
+            DE.low = read(SP.full++);
+            DE.high = read(SP.full++);
+            break;
+        case 0xD2: // JP NC,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (!F_C) {
+                PC = t_u16.full;
+                cycles += 4;
+            }
+            break;
+        case 0xD3:
+            // nothing here
+            break;
+        case 0xD4: // CALL NC,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (!F_C) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
-                PC = 0x0020;
-                break;
-            case 0xE8: // ADD SP,r8
-                //add_u8(&SP.full, read(PC++));
-                t_s8 = (s8)read(PC++);
-                if (t_s8 >= 0) {
-                    F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
-                    F_C = CARRY_ADD(SP.full, t_s8);
-                }
-                else {
-                    F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
-                    F_C = CARRY_SUB(SP.full, t_s8);
-                }
-                F_N = 0;
-                F_Z = 0;
-                SP.full += t_s8;
-                break;
-            case 0xE9: // JP (HL)
-                PC = HL.full;
-                break;
-            case 0xEA: // LD (a16),A
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                write(t_u16.full, A);
-                break;
-            case 0xEB:
-                // nothing here
-                break;
-            case 0xEC:
-                // nothing here
-                break;
-            case 0xED:
-                // nothing here
-                break;
-            case 0xEE: // XOR d8
-                xor_u8(read(PC++));
-                break;
-            case 0xEF: // RST 28H
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xD5: // PUSH DE
+            write(--SP.full, DE.high);
+            write(--SP.full, DE.low);
+            break;
+        case 0xD6: // SUB d8
+            sub_u8(read(PC++));
+            break;
+        case 0xD7: // RST 10H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0010;
+            break;
+        case 0xD8: // RET C
+            if (F_C) {
+                // Pop 2 bytes from the stack and increase SP (stack grows downwards)
+                t_u16.low = read(SP.full++);
+                t_u16.high = read(SP.full++);
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xD9: // RETI
+            t_u16.low = read(SP.full++);
+            t_u16.high = read(SP.full++);
+            PC = t_u16.full;
+            interrupts_enabled = 1;
+            break;
+        case 0xDA: // JP C,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (F_C) {
+                PC = t_u16.full;
+                cycles += 4;
+            }
+            break;
+        case 0xDB:
+            // nothing here
+            break;
+        case 0xDC: // CALL C,a16
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            if (F_C) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
-                PC = 0x0028;
-                break;
+                PC = t_u16.full;
+                cycles += 12;
+            }
+            break;
+        case 0xDD:
+            // nothing here
+            break;
+        case 0xDE: // SBC A,d8
+            sbc_u8(read(PC++));
+            break;
+        case 0xDF: // RST 18H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0018;
+            break;
 
-            case 0xF0: // LDH A,(a8)
-                // Put value in memory address 0xFF00+n into A
-                t_u8 = read(PC++);
-                A = read(MEM_IO + t_u8);
-                break;
-            case 0xF1: // POP AF
-                t_u8 = read(SP.full++);
-                F_C = GET_BIT(t_u8, 4);
-                F_H = GET_BIT(t_u8, 5);
-                F_N = GET_BIT(t_u8, 6);
-                F_Z = GET_BIT(t_u8, 7);
-                A = read(SP.full++);
-                break;
-            case 0xF2: // LD A,(C)
-                // Put value in memory address 0xFF00+C into A
-                A = read(MEM_IO + BC.low);
-                break;
-            case 0xF3: // DI
-                interrupts_enabled = 0;
-                break;
-            case 0xF4:
-                // nothing here
-                break;
-            case 0xF5: // PUSH AF
-                write(--SP.full, A);
-                // reconstruct the F register
-                t_u8 = 0;
-                t_u8 |= ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4));
-                write(--SP.full, t_u8);
-                break;
-            case 0xF6: // OR d8
-                or_u8(read(PC++));
-                break;
-            case 0xF7: // RST 30H
-                // push PC onto stack, then jump to address
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
-                PC = 0x0030;
-                break;
-            case 0xF8: // LD HL,SP+r8
-                t_s8 = (s8)read(PC++);
-                t_u16.full = SP.full;
-                if (t_s8 >= 0) {
-                    F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
-                    F_C = CARRY_ADD(SP.full, t_s8);
-                }
-                else {
-                    F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
-                    F_C = CARRY_SUB(SP.full, t_s8);
-                }
-                F_N = 0;
-                F_Z = 0;
-                HL.full = (SP.full + t_s8);
-                break;
-            case 0xF9: // LD SP,HL
-                SP.full = HL.full;
-                break;
-            case 0xFA: // LD A,(a16)
-                t_u16.low = read(PC++);
-                t_u16.high = read(PC++);
-                A = read(t_u16.full);
-                break;
-            case 0xFB: // EI
-                interrupts_enabled = 1;
-                break;
-            case 0xFC:
-                // nothing here
-                break;
-            case 0xFD:
-                // nothing here
-                break;
-            case 0xFE: // CP d8
-                cp_u8(read(PC++));
-                break;
-            case 0xFF: // RST 38H
-                // push PC onto stack, then jump to address
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
-                PC = 0x0038;
-                break;
-        }
-    }
-    // Prefix CB
-    else {
-        prefix_cb = 0;
+        case 0xE0: // LDH (a8),A
+            // Put A into memory address 0xFF00+n (IO)
+            write(MEM_IO + read(PC++), A);
+            break;
+        case 0xE1: // POP HL
+            HL.low = read(SP.full++);
+            HL.high = read(SP.full++);
+            break;
+        case 0xE2: // LD (C),A
+            // Put A into memory address 0xFF00+C (IO)
+            write(MEM_IO + BC.low, A);
+            break;
+        case 0xE3:
+            // nothing here
+            break;
+        case 0xE4:
+            // nothing here
+            break;
+        case 0xE5: // PUSH HL
+            write(--SP.full, HL.high);
+            write(--SP.full, HL.low);
+            break;
+        case 0xE6: // AND d8
+            and_u8(read(PC++));
+            break;
+        case 0xE7: // RST 20H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0020;
+            break;
+        case 0xE8: // ADD SP,r8
+            //add_u8(&SP.full, read(PC++));
+            t_s8 = (s8)read(PC++);
+            if (t_s8 >= 0) {
+                F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
+                F_C = CARRY_ADD(SP.full, t_s8);
+            }
+            else {
+                F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
+                F_C = CARRY_SUB(SP.full, t_s8);
+            }
+            F_N = 0;
+            F_Z = 0;
+            SP.full += t_s8;
+            break;
+        case 0xE9: // JP (HL)
+            PC = HL.full;
+            break;
+        case 0xEA: // LD (a16),A
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            write(t_u16.full, A);
+            break;
+        case 0xEB:
+            // nothing here
+            break;
+        case 0xEC:
+            // nothing here
+            break;
+        case 0xED:
+            // nothing here
+            break;
+        case 0xEE: // XOR d8
+            xor_u8(read(PC++));
+            break;
+        case 0xEF: // RST 28H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0028;
+            break;
 
-        if ((op & 0xF) == 0x6 || (op & 0xF) == 0xE) cycles = 16;
-        else cycles = 8;
-
-        switch (op)
-        {
-            case 0x00: // RLC B
-                rlc(&BC.high);
-                break;
-            case 0x01: // RLC C
-                rlc(&BC.low);
-                break;
-            case 0x02: // RLC D
-                rlc(&DE.high);
-                break;
-            case 0x03: // RLC E
-                rlc(&DE.low);
-                break;
-            case 0x04: // RLC H
-                rlc(&HL.high);
-                break;
-            case 0x05: // RLC L
-                rlc(&HL.low);
-                break;
-            case 0x06: // RLC (HL)
-                t_u8 = read(HL.full);
-                rlc(&t_u8);
-                break;
-            case 0x07: // RLC A
-                rlc(&A);
-                break;
-            case 0x08: // RRC B
-                rrc(&BC.high);
-                break;
-            case 0x09: // RRC C
-                rrc(&BC.low);
-                break;
-            case 0x0A: // RRC D
-                rrc(&DE.high);
-                break;
-            case 0x0B: // RRC E
-                rrc(&DE.low);
-                break;
-            case 0x0C: // RRC H
-                rrc(&HL.high);
-                break;
-            case 0x0D: // RRC L
-                rrc(&HL.low);
-                break;
-            case 0x0E: // RRC (HL)
-                t_u8 = read(HL.full);
-                rrc(&t_u8);
-                break;
-            case 0x0F: // RRC A
-                rrc(&A);
-                break;
-            case 0x10: // RL B
-                rl(&BC.high);
-                break;
-            case 0x11: // RL C
-                rl(&BC.low);
-                break;
-            case 0x12: // RL D
-                rl(&DE.high);
-                break;
-            case 0x13: // RL E
-                rl(&DE.low);
-                break;
-            case 0x14: // RL H
-                rl(&HL.high);
-                break;
-            case 0x15: // RL L
-                rl(&HL.low);
-                break;
-            case 0x16: // RL (HL)
-                t_u8 = read(HL.full);
-                rl(&t_u8);
-                break;
-            case 0x17: // RL A
-                rl(&A);
-                break;
-            case 0x18: // RR B
-                rr(&BC.high);
-                break;
-            case 0x19: // RR C
-                rr(&BC.low);
-                break;
-            case 0x1A: // RR D
-                rr(&DE.high);
-                break;
-            case 0x1B: // RR E
-                rr(&DE.low);
-                break;
-            case 0x1C: // RR H
-                rr(&HL.high);
-                break;
-            case 0x1D: // RR L
-                rr(&HL.low);
-                break;
-            case 0x1E: // RR (HL)
-                t_u8 = read(HL.full);
-                rr(&t_u8);
-                break;
-            case 0x1F: // RR A
-                rr(&A);
-                break;
-            case 0x20: // SLA B
-                sla(&BC.high);
-                break;
-            case 0x21: // SLA C
-                sla(&BC.low);
-                break;
-            case 0x22: // SLA D
-                sla(&DE.high);
-                break;
-            case 0x23: // SLA E
-                sla(&DE.low);
-                break;
-            case 0x24: // SLA H
-                sla(&HL.high);
-                break;
-            case 0x25: // SLA L
-                sla(&HL.low);
-                break;
-            case 0x26: // SLA (HL)
-                t_u8 = read(HL.full);
-                sla(&t_u8);
-                break;
-            case 0x27: // SLA A
-                sla(&A);
-                break;
-            case 0x28: // SRA B
-                sra(&BC.high);
-                break;
-            case 0x29: // SRA C
-                sra(&BC.low);
-                break;
-            case 0x2A: // SRA D
-                sra(&DE.high);
-                break;
-            case 0x2B: // SRA E
-                sra(&DE.low);
-                break;
-            case 0x2C: // SRA H
-                sra(&HL.high);
-                break;
-            case 0x2D: // SRA L
-                sra(&HL.low);
-                break;
-            case 0x2E: // SRA (HL)
-                t_u8 = read(HL.full);
-                sra(&t_u8);
-                break;
-            case 0x2F: // SRA A
-                sra(&A);
-                break;
-            case 0x30: // SWAP B
-                swap(&BC.high);
-                break;
-            case 0x31: // SWAP C
-                swap(&BC.low);
-                break;
-            case 0x32: // SWAP D
-                swap(&DE.high);
-                break;
-            case 0x33: // SWAP E
-                swap(&DE.low);
-                break;
-            case 0x34: // SWAP H
-                swap(&HL.high);
-                break;
-            case 0x35: // SWAP L
-                swap(&HL.low);
-                break;
-            case 0x36: // SWAP (HL)
-                t_u8 = read(HL.full);
-                swap(&t_u8);
-                break;
-            case 0x37: // SWAP A
-                swap(&A);
-                break;
-            case 0x38: // SRL B
-                srl(&BC.high);
-                break;
-            case 0x39: // SRL C
-                srl(&BC.low);
-                break;
-            case 0x3A: // SRL D
-                srl(&DE.high);
-                break;
-            case 0x3B: // SRL E
-                srl(&DE.low);
-                break;
-            case 0x3C: // SRL H
-                srl(&HL.high);
-                break;
-            case 0x3D: // SRL L
-                srl(&HL.low);
-                break;
-            case 0x3E: // SRL (HL)
-                t_u8 = read(HL.full);
-                srl(&t_u8);
-                break;
-            case 0x3F: // SRL A
-                srl(&A);
-                break;
-            case 0x40: // BIT 0,B
-                test_bit(&BC.high, 0);
-                break;
-            case 0x41: // BIT 0,C
-                test_bit(&BC.low, 0);
-                break;
-            case 0x42: // BIT 0,D
-                test_bit(&DE.high, 0);
-                break;
-            case 0x43: // BIT 0,E
-                test_bit(&DE.low, 0);
-                break;
-            case 0x44: // BIT 0,H
-                test_bit(&HL.high, 0);
-                break;
-            case 0x45: // BIT 0,L
-                test_bit(&HL.low, 0);
-                break;
-            case 0x46: // BIT 0,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 0);
-                break;
-            case 0x47: // BIT 0,A
-                test_bit(&A, 0);
-                break;
-            case 0x48: // BIT 1,B
-                test_bit(&BC.high, 1);
-                break;
-            case 0x49: // BIT 1,C
-                test_bit(&BC.low, 1);
-                break;
-            case 0x4A: // BIT 1,D
-                test_bit(&DE.high, 1);
-                break;
-            case 0x4B: // BIT 1,E
-                test_bit(&DE.low, 1);
-                break;
-            case 0x4C: // BIT 1,H
-                test_bit(&HL.high, 1);
-                break;
-            case 0x4D: // BIT 1,L
-                test_bit(&HL.low, 1);
-                break;
-            case 0x4E: // BIT 1,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 1);
-                break;
-            case 0x4F: // BIT 1,A
-                test_bit(&A, 1);
-                break;
-            case 0x50: // BIT 2,B
-                test_bit(&BC.high, 2);
-                break;
-            case 0x51: // BIT 2,C
-                test_bit(&BC.low, 2);
-                break;
-            case 0x52: // BIT 2,D
-                test_bit(&DE.high, 2);
-                break;
-            case 0x53: // BIT 2,E
-                test_bit(&DE.low, 2);
-                break;
-            case 0x54: // BIT 2,H
-                test_bit(&HL.high, 2);
-                break;
-            case 0x55: // BIT 2,L
-                test_bit(&HL.low, 2);
-                break;
-            case 0x56: // BIT 2,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 2);
-                break;
-            case 0x57: // BIT 2,A
-                test_bit(&A, 2);
-                break;
-            case 0x58: // BIT 3,B
-                test_bit(&BC.high, 3);
-                break;
-            case 0x59: // BIT 3,C
-                test_bit(&BC.low, 3);
-                break;
-            case 0x5A: // BIT 3,D
-                test_bit(&DE.high, 3);
-                break;
-            case 0x5B: // BIT 3,E
-                test_bit(&DE.low, 3);
-                break;
-            case 0x5C: // BIT 3,H
-                test_bit(&HL.high, 3);
-                break;
-            case 0x5D: // BIT 3,L
-                test_bit(&HL.low, 3);
-                break;
-            case 0x5E: // BIT 3,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 3);
-                break;
-            case 0x5F: // BIT 3,A
-                test_bit(&A, 3);
-                break;
-            case 0x60: // BIT 4,B
-                test_bit(&BC.high, 4);
-                break;
-            case 0x61: // BIT 4,C
-                test_bit(&BC.low, 4);
-                break;
-            case 0x62: // BIT 4,D
-                test_bit(&DE.high, 4);
-                break;
-            case 0x63: // BIT 4,E
-                test_bit(&DE.low, 4);
-                break;
-            case 0x64: // BIT 4,H
-                test_bit(&HL.high, 4);
-                break;
-            case 0x65: // BIT 4,L
-                test_bit(&HL.low, 4);
-                break;
-            case 0x66: // BIT 4,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 4);
-                break;
-            case 0x67: // BIT 4,A
-                test_bit(&A, 4);
-                break;
-            case 0x68: // BIT 5,B
-                test_bit(&BC.high, 5);
-                break;
-            case 0x69: // BIT 5,C
-                test_bit(&BC.low, 5);
-                break;
-            case 0x6A: // BIT 5,D
-                test_bit(&DE.high, 5);
-                break;
-            case 0x6B: // BIT 5,E
-                test_bit(&DE.low, 5);
-                break;
-            case 0x6C: // BIT 5,H
-                test_bit(&HL.high, 5);
-                break;
-            case 0x6D: // BIT 5,L
-                test_bit(&HL.low, 5);
-                break;
-            case 0x6E: // BIT 5,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 5);
-                break;
-            case 0x6F: // BIT 5,A
-                test_bit(&A, 5);
-                break;
-            case 0x70: // BIT 6,B
-                test_bit(&BC.high, 6);
-                break;
-            case 0x71: // BIT 6,C
-                test_bit(&BC.low, 6);
-                break;
-            case 0x72: // BIT 6,D
-                test_bit(&DE.high, 6);
-                break;
-            case 0x73: // BIT 6,E
-                test_bit(&DE.low, 6);
-                break;
-            case 0x74: // BIT 6,H
-                test_bit(&HL.high, 6);
-                break;
-            case 0x75: // BIT 6,L
-                test_bit(&HL.low, 6);
-                break;
-            case 0x76: // BIT 6,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 6);
-                break;
-            case 0x77: // BIT 6,A
-                test_bit(&A, 6);
-                break;
-            case 0x78: // BIT 7,B
-                test_bit(&BC.high, 7);
-                break;
-            case 0x79: // BIT 7,C
-                test_bit(&BC.low, 7);
-                break;
-            case 0x7A: // BIT 7,D
-                test_bit(&DE.high, 7);
-                break;
-            case 0x7B: // BIT 7,E
-                test_bit(&DE.low, 7);
-                break;
-            case 0x7C: // BIT 7,H
-                test_bit(&HL.high, 7);
-                break;
-            case 0x7D: // BIT 7,L
-                test_bit(&HL.low, 7);
-                break;
-            case 0x7E: // BIT 7,(HL)
-                t_u8 = read(HL.full);
-                test_bit(&t_u8, 7);
-                break;
-            case 0x7F: // BIT 7,A
-                test_bit(&A, 7);
-                break;
-            case 0x80: // RES 0,B
-                RESET_BIT(BC.high, 0);
-                break;
-            case 0x81: // RES 0,C
-                RESET_BIT(BC.low, 0);
-                break;
-            case 0x82: // RES 0,D
-                RESET_BIT(DE.high, 0);
-                break;
-            case 0x83: // RES 0,E
-                RESET_BIT(DE.low, 0);
-                break;
-            case 0x84: // RES 0,H
-                RESET_BIT(HL.high, 0);
-                break;
-            case 0x85: // RES 0,L
-                RESET_BIT(HL.low, 0);
-                break;
-            case 0x86: // RES 0,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 0);
-                write(HL.full, t_u8);
-                break;
-            case 0x87: // RES 0,A
-                RESET_BIT(A, 0);
-                break;
-            case 0x88: // RES 1,B
-                RESET_BIT(BC.high, 1);
-                break;
-            case 0x89: // RES 1,C
-                RESET_BIT(BC.low, 1);
-                break;
-            case 0x8A: // RES 1,D
-                RESET_BIT(DE.high, 1);
-                break;
-            case 0x8B: // RES 1,E
-                RESET_BIT(DE.low, 1);
-                break;
-            case 0x8C: // RES 1,H
-                RESET_BIT(HL.high, 1);
-                break;
-            case 0x8D: // RES 1,L
-                RESET_BIT(HL.low, 1);
-                break;
-            case 0x8E: // RES 1,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 1);
-                write(HL.full, t_u8);
-                break;
-            case 0x8F: // RES 1,A
-                RESET_BIT(A, 1);
-                break;
-            case 0x90: // RES 2,B
-                RESET_BIT(BC.high, 2);
-                break;
-            case 0x91: // RES 2,C
-                RESET_BIT(BC.low, 2);
-                break;
-            case 0x92: // RES 2,D
-                RESET_BIT(DE.high, 2);
-                break;
-            case 0x93: // RES 2,E
-                RESET_BIT(DE.low, 2);
-                break;
-            case 0x94: // RES 2,H
-                RESET_BIT(HL.high, 2);
-                break;
-            case 0x95: // RES 2,L
-                RESET_BIT(HL.low, 2);
-                break;
-            case 0x96: // RES 2,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 2);
-                write(HL.full, t_u8);
-                break;
-            case 0x97: // RES 2,A
-                RESET_BIT(A, 2);
-                break;
-            case 0x98: // RES 3,B
-                RESET_BIT(BC.high, 3);
-                break;
-            case 0x99: // RES 3,C
-                RESET_BIT(BC.low, 3);
-                break;
-            case 0x9A: // RES 3,D
-                RESET_BIT(DE.high, 3);
-                break;
-            case 0x9B: // RES 3,E
-                RESET_BIT(DE.low, 3);
-                break;
-            case 0x9C: // RES 3,H
-                RESET_BIT(HL.high, 3);
-                break;
-            case 0x9D: // RES 3,L
-                RESET_BIT(HL.low, 3);
-                break;
-            case 0x9E: // RES 3,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 3);
-                write(HL.full, t_u8);
-                break;
-            case 0x9F: // RES 3,A
-                RESET_BIT(A, 3);
-                break;
-            case 0xA0: // RES 4,B
-                RESET_BIT(BC.high, 4);
-                break;
-            case 0xA1: // RES 4,C
-                RESET_BIT(BC.low, 4);
-                break;
-            case 0xA2: // RES 4,D
-                RESET_BIT(DE.high, 4);
-                break;
-            case 0xA3: // RES 4,E
-                RESET_BIT(DE.low, 4);
-                break;
-            case 0xA4: // RES 4,H
-                RESET_BIT(HL.high, 4);
-                break;
-            case 0xA5: // RES 4,L
-                RESET_BIT(HL.low, 4);
-                break;
-            case 0xA6: // RES 4,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 4);
-                write(HL.full, t_u8);
-                break;
-            case 0xA7: // RES 4,A
-                RESET_BIT(A, 4);
-                break;
-            case 0xA8: // RES 5,B
-                RESET_BIT(BC.high, 5);
-                break;
-            case 0xA9: // RES 5,C
-                RESET_BIT(BC.low, 5);
-                break;
-            case 0xAA: // RES 5,D
-                RESET_BIT(DE.high, 5);
-                break;
-            case 0xAB: // RES 5,E
-                RESET_BIT(DE.low, 5);
-                break;
-            case 0xAC: // RES 5,H
-                RESET_BIT(HL.high, 5);
-                break;
-            case 0xAD: // RES 5,L
-                RESET_BIT(HL.low, 5);
-                break;
-            case 0xAE: // RES 5,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 5);
-                write(HL.full, t_u8);
-                break;
-            case 0xAF: // RES 5,A
-                RESET_BIT(A, 5);
-                break;
-            case 0xB0: // RES 6,B
-                RESET_BIT(BC.high, 6);
-                break;
-            case 0xB1: // RES 6,C
-                RESET_BIT(BC.low, 6);
-                break;
-            case 0xB2: // RES 6,D
-                RESET_BIT(DE.high, 6);
-                break;
-            case 0xB3: // RES 6,E
-                RESET_BIT(DE.low, 6);
-                break;
-            case 0xB4: // RES 6,H
-                RESET_BIT(HL.high, 6);
-                break;
-            case 0xB5: // RES 6,L
-                RESET_BIT(HL.low, 6);
-                break;
-            case 0xB6: // RES 6,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 6);
-                write(HL.full, t_u8);
-                break;
-            case 0xB7: // RES 6,A
-                RESET_BIT(A, 6);
-                break;
-            case 0xB8: // RES 7,B
-                RESET_BIT(BC.high, 7);
-                break;
-            case 0xB9: // RES 7,C
-                RESET_BIT(BC.low, 7);
-                break;
-            case 0xBA: // RES 7,D
-                RESET_BIT(DE.high, 7);
-                break;
-            case 0xBB: // RES 7,E
-                RESET_BIT(DE.low, 7);
-                break;
-            case 0xBC: // RES 7,H
-                RESET_BIT(HL.high, 7);
-                break;
-            case 0xBD: // RES 7,L
-                RESET_BIT(HL.low, 7);
-                break;
-            case 0xBE: // RES 7,(HL)
-                t_u8 = read(HL.full);
-                RESET_BIT(t_u8, 7);
-                write(HL.full, t_u8);
-                break;
-            case 0xBF: // RES 7,A
-                RESET_BIT(A, 7);
-                break;
-            case 0xC0: // SET 0,B
-                SET_BIT(BC.high, 0);
-                break;
-            case 0xC1: // SET 0,C
-                SET_BIT(BC.low, 0);
-                break;
-            case 0xC2: // SET 0,D
-                SET_BIT(DE.high, 0);
-                break;
-            case 0xC3: // SET 0,E
-                SET_BIT(DE.low, 0);
-                break;
-            case 0xC4: // SET 0,H
-                SET_BIT(HL.high, 0);
-                break;
-            case 0xC5: // SET 0,L
-                SET_BIT(HL.low, 0);
-                break;
-            case 0xC6: // SET 0,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 0);
-                write(HL.full, t_u8);
-                break;
-            case 0xC7: // SET 0,A
-                SET_BIT(A, 0);
-                break;
-            case 0xC8: // SET 1,B
-                SET_BIT(BC.high, 1);
-                break;
-            case 0xC9: // SET 1,C
-                SET_BIT(BC.low, 1);
-                break;
-            case 0xCA: // SET 1,D
-                SET_BIT(DE.high, 1);
-                break;
-            case 0xCB: // SET 1,E
-                SET_BIT(DE.low, 1);
-                break;
-            case 0xCC: // SET 1,H
-                SET_BIT(HL.high, 1);
-                break;
-            case 0xCD: // SET 1,L
-                SET_BIT(HL.low, 1);
-                break;
-            case 0xCE: // SET 1,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 1);
-                write(HL.full, t_u8);
-                break;
-            case 0xCF: // SET 1,A
-                SET_BIT(A, 1);
-                break;
-            case 0xD0: // SET 2,B
-                SET_BIT(BC.high, 2);
-                break;
-            case 0xD1: // SET 2,C
-                SET_BIT(BC.low, 2);
-                break;
-            case 0xD2: // SET 2,D
-                SET_BIT(DE.high, 2);
-                break;
-            case 0xD3: // SET 2,E
-                SET_BIT(DE.low, 2);
-                break;
-            case 0xD4: // SET 2,H
-                SET_BIT(HL.high, 2);
-                break;
-            case 0xD5: // SET 2,L
-                SET_BIT(HL.low, 2);
-                break;
-            case 0xD6: // SET 2,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 2);
-                write(HL.full, t_u8);
-                break;
-            case 0xD7: // SET 2,A
-                SET_BIT(A, 2);
-                break;
-            case 0xD8: // SET 3,B
-                SET_BIT(BC.high, 3);
-                break;
-            case 0xD9: // SET 3,C
-                SET_BIT(BC.low, 3);
-                break;
-            case 0xDA: // SET 3,D
-                SET_BIT(DE.high, 3);
-                break;
-            case 0xDB: // SET 3,E
-                SET_BIT(DE.low, 3);
-                break;
-            case 0xDC: // SET 3,H
-                SET_BIT(HL.high, 3);
-                break;
-            case 0xDD: // SET 3,L
-                SET_BIT(HL.low, 3);
-                break;
-            case 0xDE: // SET 3,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 3);
-                write(HL.full, t_u8);
-                break;
-            case 0xDF: // SET 3,A
-                SET_BIT(A, 3);
-                break;
-            case 0xE0: // SET 4,B
-                SET_BIT(BC.high, 4);
-                break;
-            case 0xE1: // SET 4,C
-                SET_BIT(BC.low, 4);
-                break;
-            case 0xE2: // SET 4,D
-                SET_BIT(DE.high, 4);
-                break;
-            case 0xE3: // SET 4,E
-                SET_BIT(DE.low, 4);
-                break;
-            case 0xE4: // SET 4,H
-                SET_BIT(HL.high, 4);
-                break;
-            case 0xE5: // SET 4,L
-                SET_BIT(HL.low, 4);
-                break;
-            case 0xE6: // SET 4,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 4);
-                write(HL.full, t_u8);
-                break;
-            case 0xE7: // SET 4,A
-                SET_BIT(A, 4);
-                break;
-            case 0xE8: // SET 5,B
-                SET_BIT(BC.high, 5);
-                break;
-            case 0xE9: // SET 5,C
-                SET_BIT(BC.low, 5);
-                break;
-            case 0xEA: // SET 5,D
-                SET_BIT(DE.high, 5);
-                break;
-            case 0xEB: // SET 5,E
-                SET_BIT(DE.low, 5);
-                break;
-            case 0xEC: // SET 5,H
-                SET_BIT(HL.high, 5);
-                break;
-            case 0xED: // SET 5,L
-                SET_BIT(HL.low, 5);
-                break;
-            case 0xEE: // SET 5,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 5);
-                write(HL.full, t_u8);
-                break;
-            case 0xEF: // SET 5,A
-                SET_BIT(A, 5);
-                break;
-            case 0xF0: // SET 6,B
-                SET_BIT(BC.high, 6);
-                break;
-            case 0xF1: // SET 6,C
-                SET_BIT(BC.low, 6);
-                break;
-            case 0xF2: // SET 6,D
-                SET_BIT(DE.high, 6);
-                break;
-            case 0xF3: // SET 6,E
-                SET_BIT(DE.low, 6);
-                break;
-            case 0xF4: // SET 6,H
-                SET_BIT(HL.high, 6);
-                break;
-            case 0xF5: // SET 6,L
-                SET_BIT(HL.low, 6);
-                break;
-            case 0xF6: // SET 6,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 6);
-                write(HL.full, t_u8);
-                break;
-            case 0xF7: // SET 6,A
-                SET_BIT(A, 6);
-                break;
-            case 0xF8: // SET 7,B
-                SET_BIT(BC.high, 7);
-                break;
-            case 0xF9: // SET 7,C
-                SET_BIT(BC.low, 7);
-                break;
-            case 0xFA: // SET 7,D
-                SET_BIT(DE.high, 7);
-                break;
-            case 0xFB: // SET 7,E
-                SET_BIT(DE.low, 7);
-                break;
-            case 0xFC: // SET 7,H
-                SET_BIT(HL.high, 7);
-                break;
-            case 0xFD: // SET 7,L
-                SET_BIT(HL.low, 7);
-                break;
-            case 0xFE: // SET 7,(HL)
-                t_u8 = read(HL.full);
-                SET_BIT(t_u8, 7);
-                write(HL.full, t_u8);
-                break;
-            case 0xFF: // SET 7,A
-                SET_BIT(A, 7);
-                break;
-        }
+        case 0xF0: // LDH A,(a8)
+            // Put value in memory address 0xFF00+n into A
+            t_u8 = read(PC++);
+            A = read(MEM_IO + t_u8);
+            break;
+        case 0xF1: // POP AF
+            t_u8 = read(SP.full++);
+            F_C = GET_BIT(t_u8, 4);
+            F_H = GET_BIT(t_u8, 5);
+            F_N = GET_BIT(t_u8, 6);
+            F_Z = GET_BIT(t_u8, 7);
+            A = read(SP.full++);
+            break;
+        case 0xF2: // LD A,(C)
+            // Put value in memory address 0xFF00+C into A
+            A = read(MEM_IO + BC.low);
+            break;
+        case 0xF3: // DI
+            interrupts_enabled = 0;
+            break;
+        case 0xF4:
+            // nothing here
+            break;
+        case 0xF5: // PUSH AF
+            write(--SP.full, A);
+            // reconstruct the F register
+            t_u8 = 0;
+            t_u8 |= ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4));
+            write(--SP.full, t_u8);
+            break;
+        case 0xF6: // OR d8
+            or_u8(read(PC++));
+            break;
+        case 0xF7: // RST 30H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0030;
+            break;
+        case 0xF8: // LD HL,SP+r8
+            t_s8 = (s8)read(PC++);
+            t_u16.full = SP.full;
+            if (t_s8 >= 0) {
+                F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
+                F_C = CARRY_ADD(SP.full, t_s8);
+            }
+            else {
+                F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
+                F_C = CARRY_SUB(SP.full, t_s8);
+            }
+            F_N = 0;
+            F_Z = 0;
+            HL.full = (SP.full + t_s8);
+            break;
+        case 0xF9: // LD SP,HL
+            SP.full = HL.full;
+            break;
+        case 0xFA: // LD A,(a16)
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            A = read(t_u16.full);
+            break;
+        case 0xFB: // EI
+            interrupts_enabled = 1;
+            break;
+        case 0xFC:
+            // nothing here
+            break;
+        case 0xFD:
+            // nothing here
+            break;
+        case 0xFE: // CP d8
+            cp_u8(read(PC++));
+            break;
+        case 0xFF: // RST 38H
+            // push PC onto stack, then jump to address
+            write(--SP.full, (PC >> 8) & 0xFF);
+            write(--SP.full, (PC & 0xFF));
+            PC = 0x0038;
+            break;
     }
     return cycles;
 }
@@ -2602,6 +2693,8 @@ void update_inputs(u8* in) {
     u8 select_direction = !GET_BIT(reg[REG_P1], 4);
     u8 select_action    = !GET_BIT(reg[REG_P1], 5);
 
+    u8 inputs_prev = reg[REG_P1];
+
     if (select_direction && select_action) { // AND layouts when both are selected
         reg[REG_P1] = 0xC0 | (inputs_direction & inputs_action); // 0b 1100 ????
     }
@@ -2613,6 +2706,17 @@ void update_inputs(u8* in) {
     }
     else { 
         reg[REG_P1] = 0xFF; // 0b 0011 1111
+    }
+
+    // The Joypad interrupt is requested when any of P1 bits 0-3 change from High to Low
+    // Indicating that a button was pressed
+    for (u8 i=0; i<=3; i++) { 
+        if (GET_BIT(inputs_prev, i) && !GET_BIT(reg[REG_P1], i)) {
+            // Joypad interrupt
+            SET_BIT(reg[REG_IF], INT_BIT_JOYPAD);
+            //printf("int request: joypad\n");
+            break;
+        }
     }
 }
 
@@ -2641,21 +2745,107 @@ void update_timers(u8 cycles) {
             if (reg[REG_TIMA] < tima_old) {
                 reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
 
-                // request interrupt
+                // Timer interrupt
+                SET_BIT(reg[REG_IF], INT_BIT_TIMER);
+                //printf("int request: timer\n");
 
             }
         }
     }
-    //reg[REG_TIMA]
-    /*
-    u8  double_speed;
-    u16 div_counter;    // every >256, DIV++
-    u8  timer_enabled;  // bit  2   of reg TAC
-    u16 timer_speed;    // bits 0-1 of reg TAC
-    */
+    //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
 
 }
 
+void update_graphics(u8 cycles) {
+    u8 clock = (cycles << double_speed);
+
+    scanline_counter += clock;
+    // Reached end of scanline
+    if (scanline_counter > SCANLINE_DOTS) {
+        scanline_counter -= clock;
+
+        // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
+        reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
+        if (reg[REG_LYC] && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
+        {
+            // request interrupt
+            SET_BIT(reg[REG_IF], INT_BIT_STAT);
+        }
+        // Move to a new scanline
+        // DEBUG stubbed to 0x90
+        reg[REG_LY] = 0x90;
+        if (reg[REG_LY] >= 0x9A) reg[REG_LY] = 0;
+
+        // VBlank
+        if (reg[REG_LY] == SCREEN_HEIGHT) {
+            //printf("VBlank start...\n");
+            // change lcd mode to vblank
+            SET_BIT(reg[REG_STAT], LCD_MODE_VBLANK);
+            // request interrupt if enabled
+            if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
+                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+            }
+        }
+        // HBlank
+        else if (reg[REG_LY] < SCREEN_HEIGHT) {
+            // change lcd mode to hblank
+            SET_BIT(reg[REG_STAT], LCD_MODE_HBLANK);
+            // request interrupt if enabled
+            if (GET_BIT(reg[REG_STAT], STAT_INT_HBLANK)) {
+                SET_BIT(reg[REG_IF], INT_BIT_STAT);
+            }
+
+            // HBLANK HDMA
+        }
+    }
+    // OAM access
+    else {
+
+    }
+    // ...
+}
+
+void do_interrupts() {
+    if (!interrupt_is_pending()) return;
+
+    if (halted) {
+        halted = 0; // The CPU wakes up
+        printf("CPU woke up\n");
+    }
+
+    // The interrupt handler is called normally
+    if (interrupts_enabled) {
+        // Interrupt priority
+        for (u8 i = 0; i <= 4; i++) {
+            if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
+
+                RESET_BIT(reg[REG_IF], i);
+                interrupts_enabled = 0;
+
+                // CALL interrupt vector
+                // push PC onto stack, then jump to address
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+
+                switch (i) {
+                    case 0: PC = INT_VEC_VBLANK; printf("int: vblank\n");   break;
+                    case 1: PC = INT_VEC_STAT;   printf("int: stat\n");     break;
+                    case 2: PC = INT_VEC_TIMER;  printf("int: timer\n");    break;
+                    case 3: PC = INT_VEC_SERIAL; printf("int: serial\n");   break;
+                    case 4: PC = INT_VEC_JOYPAD; printf("int: joypad\n");   break;
+                }
+                break;
+            }
+        }
+    }
+    // TODO - halt bug
+    else {
+        
+
+    }
+}
+
+int counter = 1;
 void emu_cpu_update(u8* inputs)
 {
     u8 op; // the current operand read from memory at PC location
@@ -2667,15 +2857,32 @@ void emu_cpu_update(u8* inputs)
 
     while (cycles_this_update < MAXDOTS)
     {
+        /*
+        if (counter > 1069000 && counter < 1073000)
+        {
+            printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
+                counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
+                SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
+        }
+        */
+        counter++;
+        
         // Fetch instruction
-        op = read(PC++);
+        if (counter % 1000 == 0)
+        {
+            u8 i = 0;
+        }
+        if (counter == 1070031) {
+            u8 i = 0;
+        }
+        op = (halted ? 0x00 : read(PC++)); // NOP when halted
         cycles = execute_instruction(op);
 
         cycles_this_update += cycles;
+
         update_timers(cycles);
-        //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
-        //UpdateGraphics(cycles);
-        //DoInterupts();
+        update_graphics(cycles);
+        do_interrupts();
 
         //blarggs test - serial output
         if (reg[REG_SC] == 0x81) {
@@ -2685,6 +2892,10 @@ void emu_cpu_update(u8* inputs)
         }
         //printf("%4x", op);
     }
+    // VBlank interrupt (LY = 144)
+    //SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+
+    /*
     //if (reg[REG_SB] != 0) printf("%c", reg[REG_SB]);
     emu_seconds++;
     if (!test_finished && emu_seconds >= 120 * 60)
@@ -2693,8 +2904,7 @@ void emu_cpu_update(u8* inputs)
         printf("results:\nB: %d, C: %d, D: %d, E: %d, H: %d, L: %d\n", BC.high, BC.low, DE.high, DE.low, HL.high, HL.low);
         test_finished = 1;
     }
-    //printf("cpu cycles: %d\n", cycles_this_update);
-    //printf("fps: %d, cpu: %d\n", timer_total, cycles_this_update);
+    */
 }
 
 void emu_cpu_cleanup()

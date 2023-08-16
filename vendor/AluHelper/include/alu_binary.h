@@ -32,12 +32,14 @@ extern "C" {
 #define ROTATE_LEFT(a, n, bitsize)  (((a) << (n)) | ((a) >> (bitsize-(n))))
 #define ROTATE_RIGHT(a, n, bitsize) (((a) >> (n)) | ((a) << (bitsize-(n))))
 
-#define CARRY_ADD(a, b)             (((a) + (b)) < (a))
-#define CARRY_SUB(a, b)             (((a) - (b)) > (a))
-#define HALF_CARRY_U8_ADD(a, b)     ((((a) & 0xF) + ((b) & 0xF)) & 0x10 == 0x10)
-#define HALF_CARRY_U8_SUB(a, b)     (((int)((a) & 0xF) - (int)((b) & 0xF)) & 0x10 == 0x10)
-#define HALF_CARRY_U16_ADD(a, b)    ((((a) & 0xFFF) + ((b) & 0xFFF)) & 0x1000 == 0x1000)
-#define HALF_CARRY_U16_SUB(a, b)    (((int)((a) & 0xFFF) - (int)((b) & 0xFFF)) & 0x1000 == 0x1000)
+#define CARRY_ADD(a, b)             ((((a) + (b)) & 0xFF) < (a))
+#define CARRY_ADD_U16(a, b)         ((((a) + (b)) & 0xFFFF) < (a))
+#define CARRY_SUB(a, b)             ((((a) - (b)) & 0xFF) > (a))
+#define CARRY_SUB_U16(a, b)         ((((a) - (b)) & 0xFFFF) > (a))
+#define HALF_CARRY_U8_ADD(a, b)     (((((a) & 0xF) + ((b) & 0xF)) & 0x10) == 0x10)
+#define HALF_CARRY_U8_SUB(a, b)     ((((int)((a) & 0xF) - (int)((b) & 0xF)) & 0x10) == 0x10)
+#define HALF_CARRY_U16_ADD(a, b)    (((((a) & 0xFFF) + ((b) & 0xFFF)) & 0x1000) == 0x1000)
+#define HALF_CARRY_U16_SUB(a, b)    ((((int)((a) & 0xFFF) - (int)((b) & 0xFFF)) & 0x1000) == 0x1000)
 
     typedef char            s8;
     typedef unsigned char   u8;
