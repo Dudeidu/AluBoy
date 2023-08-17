@@ -136,7 +136,7 @@ void sbc_u8(u8 b) {
     int diff = A - b - carry;  // Calculate the difference with borrow
     u8 result = (u8)diff;
 
-    F_H = (((A & 0xf) - (b & 0xf) - carry) < 0);
+    F_H = (((A & 0xF) - (b & 0xF) - carry) < 0);
     F_C = (diff < 0);  // Update the carry flag
     A = result;  // Store the result in *a
     F_N = 1;  // Set the subtraction flag
@@ -254,7 +254,7 @@ void swap(u8* a) {
     F_C = 0;
 }
 void test_bit(u8* a, u8 b) {
-    F_Z = GET_BIT(*a, b);
+    F_Z = !GET_BIT(*a, b);
     F_N = 0;
     F_H = 1;
 }
@@ -382,7 +382,7 @@ int emu_cpu_init(u8* rom_buffer)
     rom = rom_buffer;
 
     // Load boot ROM
-    memcpy(rom, boot_rom, 0x100);
+    //memcpy(rom, boot_rom, 0x100);
 
     // Get ROM header data
 
@@ -865,6 +865,7 @@ u8 execute_cb(u8 op) {
         case 0x06: // RLC (HL)
             t_u8 = read(HL.full);
             rlc(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x07: // RLC A
             rlc(&A);
@@ -890,6 +891,7 @@ u8 execute_cb(u8 op) {
         case 0x0E: // RRC (HL)
             t_u8 = read(HL.full);
             rrc(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x0F: // RRC A
             rrc(&A);
@@ -915,6 +917,7 @@ u8 execute_cb(u8 op) {
         case 0x16: // RL (HL)
             t_u8 = read(HL.full);
             rl(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x17: // RL A
             rl(&A);
@@ -940,6 +943,7 @@ u8 execute_cb(u8 op) {
         case 0x1E: // RR (HL)
             t_u8 = read(HL.full);
             rr(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x1F: // RR A
             rr(&A);
@@ -965,6 +969,7 @@ u8 execute_cb(u8 op) {
         case 0x26: // SLA (HL)
             t_u8 = read(HL.full);
             sla(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x27: // SLA A
             sla(&A);
@@ -990,6 +995,7 @@ u8 execute_cb(u8 op) {
         case 0x2E: // SRA (HL)
             t_u8 = read(HL.full);
             sra(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x2F: // SRA A
             sra(&A);
@@ -1015,6 +1021,7 @@ u8 execute_cb(u8 op) {
         case 0x36: // SWAP (HL)
             t_u8 = read(HL.full);
             swap(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x37: // SWAP A
             swap(&A);
@@ -1040,6 +1047,7 @@ u8 execute_cb(u8 op) {
         case 0x3E: // SRL (HL)
             t_u8 = read(HL.full);
             srl(&t_u8);
+            write(HL.full, t_u8);
             break;
         case 0x3F: // SRL A
             srl(&A);
@@ -1669,6 +1677,7 @@ u8 execute_instruction(u8 op) {
     s8       t_s8;
     u8       t_u8;
     BytePair t_u16;
+    int      t_int;
 
     cycles = op_cycles_lut[op];
 
@@ -1702,8 +1711,10 @@ u8 execute_instruction(u8 op) {
             F_H = 0;
             break;
         case 0x08: // LD (a16),SP
-            write(PC++, SP.low);
-            write(PC++, SP.high);
+            t_u16.low = read(PC++);
+            t_u16.high = read(PC++);
+            write(t_u16.full, SP.low);
+            write(t_u16.full + 1, SP.high);
             break;
         case 0x09: // ADD HL,BC
             add_u16(&HL.full, BC.full);
@@ -2551,18 +2562,16 @@ u8 execute_instruction(u8 op) {
             PC = 0x0020;
             break;
         case 0xE8: // ADD SP,r8
-            //add_u8(&SP.full, read(PC++));
             t_s8 = (s8)read(PC++);
-            if (t_s8 >= 0) {
-                F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
-                F_C = CARRY_ADD(SP.full, t_s8);
-            }
-            else {
-                F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
-                F_C = CARRY_SUB(SP.full, t_s8);
-            }
+            t_int = SP.full + t_s8;
+            
             F_N = 0;
             F_Z = 0;
+            // Set Half-Carry flag if bit 4 changed due to addition
+            F_H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
+            // Set Carry flag if bit 8 changed due to addition
+            F_C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
+
             SP.full += t_s8;
             break;
         case 0xE9: // JP (HL)
@@ -2633,17 +2642,15 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xF8: // LD HL,SP+r8
             t_s8 = (s8)read(PC++);
-            t_u16.full = SP.full;
-            if (t_s8 >= 0) {
-                F_H = HALF_CARRY_U16_ADD(SP.full, t_s8);
-                F_C = CARRY_ADD(SP.full, t_s8);
-            }
-            else {
-                F_H = HALF_CARRY_U16_SUB(SP.full, t_s8);
-                F_C = CARRY_SUB(SP.full, t_s8);
-            }
+            t_int = SP.full + t_s8;
+
             F_N = 0;
             F_Z = 0;
+            // Set Half-Carry flag if bit 4 changed due to addition
+            F_H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
+            // Set Carry flag if bit 8 changed due to addition
+            F_C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
+
             HL.full = (SP.full + t_s8);
             break;
         case 0xF9: // LD SP,HL
@@ -2817,7 +2824,7 @@ void do_interrupts() {
     if (interrupts_enabled) {
         // Interrupt priority
         for (u8 i = 0; i <= 4; i++) {
-            if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
+            if (GET_BIT(reg[REG_IF], i) & GET_BIT(reg[REG_IE], i)) {
 
                 RESET_BIT(reg[REG_IF], i);
                 interrupts_enabled = 0;
@@ -2828,12 +2835,13 @@ void do_interrupts() {
                 write(--SP.full, (PC & 0xFF));
 
                 switch (i) {
-                    case 0: PC = INT_VEC_VBLANK; printf("int: vblank\n");   break;
-                    case 1: PC = INT_VEC_STAT;   printf("int: stat\n");     break;
-                    case 2: PC = INT_VEC_TIMER;  printf("int: timer\n");    break;
-                    case 3: PC = INT_VEC_SERIAL; printf("int: serial\n");   break;
-                    case 4: PC = INT_VEC_JOYPAD; printf("int: joypad\n");   break;
+                    case 0: PC = INT_VEC_VBLANK; break;
+                    case 1: PC = INT_VEC_STAT;   break;
+                    case 2: PC = INT_VEC_TIMER;  break;
+                    case 3: PC = INT_VEC_SERIAL; break;
+                    case 4: PC = INT_VEC_JOYPAD; break;
                 }
+                
                 break;
             }
         }
@@ -2857,14 +2865,14 @@ void emu_cpu_update(u8* inputs)
 
     while (cycles_this_update < MAXDOTS)
     {
-        /*
-        if (counter > 1069000 && counter < 1073000)
+        
+        //if (counter > 1069000 && counter < 1073000)
         {
-            printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
-                counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
-                SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
+        //    printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
+        //        counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
+        //        SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
         }
-        */
+        
         counter++;
         
         // Fetch instruction
@@ -2872,7 +2880,7 @@ void emu_cpu_update(u8* inputs)
         {
             u8 i = 0;
         }
-        if (counter == 1070031) {
+        if (counter == 251000) {
             u8 i = 0;
         }
         op = (halted ? 0x00 : read(PC++)); // NOP when halted
