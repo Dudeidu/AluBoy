@@ -5,51 +5,7 @@
 
 #include "alu_binary.h"
 
-#define READ_U16(addr) ( read(addr) | ((u16)read((addr) + 1) << 8))
-
-
-/*
-#define INC_U8(a) \
-    do{ \
-        F_H = HALF_CARRY_U8_ADD(a, 1); \
-        a++; \
-        F_Z = (a == 0); \
-        F_N = 0; \
-    } while (0)
-
-#define DEC_U8(a) \
-    do{ \
-        F_H = HALF_CARRY_U8_SUB(a, 1); \
-        a--; \
-        F_Z = (a == 0); \
-        F_N = 1; \
-    } while (0)
-
-#define ADD_U8(a, b) \
-    do{ \
-        F_H = HALF_CARRY_U8_ADD(a, b); \
-        F_C = CARRY_ADD(a, b); \
-        F_N = 0; \
-        a += b; \
-        F_Z = (a == 0); \
-    } while (0)
-#define ADD_U16(a, b) \
-    do{ \
-        F_H = HALF_CARRY_U16_ADD(a, b); \
-        F_C = CARRY_ADD(a, b); \
-        F_N = 0; \
-        a += b; \
-    } while (0)
-
-#define SUB_U8(b) \
-    do{ \
-        F_H = HALF_CARRY_U8_SUB(A, b); \
-        F_C = CARRY_ADD(A, b); \
-        F_N = 1; \
-        A -= b; \
-        F_Z = (A == 0); \
-    } while (0)
-*/
+//#define READ_U16(addr) ( read(addr) | ((u16)read((addr) + 1) << 8))
 
 const int MAXDOTS = 70224; // 154 scanlines per frame, 456 dots per scanline = 70224 (59.7275 FPS)
 const int SCANLINE_DOTS = 456; // dots per scanline

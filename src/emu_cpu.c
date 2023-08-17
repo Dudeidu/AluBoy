@@ -27,7 +27,7 @@ BytePair HL;
 BytePair SP;        // Stack Pointer
 u16 PC;             // Program Counter/Pointer
 
-u8  prefix_cb;
+u8 cpu_mode;
 
 // Memory-mapped registers
 u8  reg[0x100];     // Refers to Register enum
@@ -286,7 +286,6 @@ int power_up()
     SP.full = 0xFFFE;
     PC = 0x0100;
 
-    prefix_cb = 0;
     interrupts_enabled = 0;
     halted = 0;
 
@@ -489,6 +488,12 @@ u8 read(u16 addr)
         case 0x7:
             // ROM bank > 0
             return rom[(addr & 0x3FFF) + (rom_bank * BANKSIZE_ROM)];
+        case 0x8:
+        case 0x9:
+            // VRAM
+            if (cgb_flag)   return vram[(addr & 0x1FF) + (reg[REG_VBK] * BANKSIZE_VRAM)];
+            else            return vram[addr & 0x1FF];
+            break;
         case 0xA:
         case 0xB:
             // RAM bank 00-03, if any
@@ -839,7 +844,11 @@ u8 execute_cb(u8 op) {
     u8 cycles;
     u8 t_u8;
 
-    if ((op & 0xF) == 0x6 || (op & 0xF) == 0xE) cycles = 16;
+    if ((op & 0xF) == 0x6 || (op & 0xF) == 0xE) // (HL) operations
+    {
+        u8 un = op >> 4; // upper nibblet
+        cycles = (un >= 4 && un <= 7) ? 12 : 16; // BIT n,(HL) = 12 cycles, rest are 16
+    }
     else cycles = 8;
 
     switch (op)
@@ -2764,7 +2773,7 @@ void update_timers(u8 cycles) {
 }
 
 void update_graphics(u8 cycles) {
-    u8 clock = (cycles << double_speed);
+    u8 clock = cycles;
 
     scanline_counter += clock;
     // Reached end of scanline
@@ -2780,7 +2789,8 @@ void update_graphics(u8 cycles) {
         }
         // Move to a new scanline
         // DEBUG stubbed to 0x90
-        reg[REG_LY] = 0x90;
+        //reg[REG_LY] = 0x90;
+        reg[REG_LY] ++;
         if (reg[REG_LY] >= 0x9A) reg[REG_LY] = 0;
 
         // VBlank
@@ -2803,10 +2813,57 @@ void update_graphics(u8 cycles) {
             }
 
             // HBLANK HDMA
+
+            // DEBUG Draw entire line //////////////////////////////
+            {
+                u8 y    = reg[REG_LY]-1;
+                u8 row  = y % 8;
+                u8 sy   = y + reg[REG_SCY]; // scroll y
+                u8 ypos = ((sy >> 3) << 5);
+
+                u8 td_area_flag = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
+                u16 bg_tm_area  = GET_BIT(reg[REG_LCDC], LCDC_BG_TILEMAP_AREA) ? 0x9C00 : 0x9800;
+
+                for (u8 x = 0; x < SCREEN_WIDTH; x++) {
+                    u16 td_addr;
+                    u8 byte1, byte2, color_index;
+                    u8 sx       = x + reg[REG_SCX]; // scroll x
+                    u8 xpos     = (sx >> 3);
+                    
+                    u8 col      = x % 8;
+                    u16 tm_addr = bg_tm_area + ypos + xpos; // ((row / 8) * 32) + (col / 8)
+                    int tile_index;
+
+                    if (td_area_flag) tile_index = read(tm_addr);
+                    else tile_index = (s8)read(tm_addr);
+
+                    // Get tile data
+                    if (td_area_flag == 1) {
+                        // unsigned addressing
+                        td_addr = 0x8000 + (tile_index * 16);
+                    }
+                    else {
+                        // signed addressing (0-127 are in block 2, -128 to -1 are in block 1)
+                        td_addr = 0x9000 + ((tile_index+128) * 16);
+                    }
+                    // Get pixel info
+                    byte1 = read(td_addr + (row * 2));      // represents lsb of the color_index of each pixel
+                    byte2 = read(td_addr + (row * 2) + 1);  // represents msb of the color_index of each pixel
+                    color_index = (GET_BIT(byte2, 7 - col) << 1) | GET_BIT(byte1, 7 - col);
+                    emu_gpu_set_pixel(x, y, color_index);
+                }
+
+                emu_gpu_set_redraw_flag(1);
+                //printf("\n");
+            }
+            
         }
     }
     // OAM access
+
+    //
     else {
+        // get pixel coordinate
 
     }
     // ...
@@ -2865,12 +2922,12 @@ void emu_cpu_update(u8* inputs)
 
     while (cycles_this_update < MAXDOTS)
     {
-        
+        /*
         //if (counter > 1069000 && counter < 1073000)
         {
-        //    printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
-        //        counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
-        //        SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
+            printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
+                counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
+                SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
         }
         
         counter++;
@@ -2883,6 +2940,8 @@ void emu_cpu_update(u8* inputs)
         if (counter == 251000) {
             u8 i = 0;
         }
+        */
+        
         op = (halted ? 0x00 : read(PC++)); // NOP when halted
         cycles = execute_instruction(op);
 
@@ -2892,27 +2951,15 @@ void emu_cpu_update(u8* inputs)
         update_graphics(cycles);
         do_interrupts();
 
+        
         //blarggs test - serial output
         if (reg[REG_SC] == 0x81) {
             char c = reg[REG_SB];
             printf("%c", c);
             reg[REG_SC] = 0x0;
         }
-        //printf("%4x", op);
+        
     }
-    // VBlank interrupt (LY = 144)
-    //SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
-
-    /*
-    //if (reg[REG_SB] != 0) printf("%c", reg[REG_SB]);
-    emu_seconds++;
-    if (!test_finished && emu_seconds >= 120 * 60)
-    {
-        //`B = 3, C = 5, D = 8, E = 13, H = 21, L = 34`.
-        printf("results:\nB: %d, C: %d, D: %d, E: %d, H: %d, L: %d\n", BC.high, BC.low, DE.high, DE.low, HL.high, HL.low);
-        test_finished = 1;
-    }
-    */
 }
 
 void emu_cpu_cleanup()

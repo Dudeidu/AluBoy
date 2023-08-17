@@ -50,6 +50,7 @@ const SDL_Color palette[] = {
     {134, 194, 112, 255},   // light
     {47, 105, 87, 255},     // dark
     {0, 0, 0, 255},         // black
+
     // ... add more colors to your palette
 };
 

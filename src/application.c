@@ -129,7 +129,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/cpu_instrs.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/01-special.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -241,12 +241,12 @@ void application_update() {
 }
 
 void application_draw() {
-    if (!redraw_flag) return; // Only draws when necessary
+    if (!emu_gpu_get_redraw_flag()) return; // Only draws when necessary
 
     graphics_update_rgba_buffer(emu_gpu_get_pixel_buffer());
     graphics_draw(window);
 
-    redraw_flag = 0; // Reset the flag
+    emu_gpu_set_redraw_flag(0);
 }
 
 void application_cleanup() {

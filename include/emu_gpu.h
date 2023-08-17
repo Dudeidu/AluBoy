@@ -23,4 +23,8 @@ void emu_gpu_set_pixel(int x, int y, u8 color_index);
 
 void emu_gpu_draw_tile(int x, int y, u8* tile_data, BufferType buffer_type);
 
+void emu_gpu_set_redraw_flag(u8 val);
+u8 emu_gpu_get_redraw_flag();
+
+
 #endif EMU_GPU_H
