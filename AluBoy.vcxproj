@@ -133,17 +133,17 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="include\emu_shared.h" />
     <ClCompile Include="src\application.c" />
-    <ClCompile Include="src\emu_cpu.c" />
-    <ClCompile Include="src\emu_gpu.c" />
+    <ClCompile Include="src\cpu.c" />
+    <ClCompile Include="src\ppu.c" />
     <ClCompile Include="src\graphics.c" />
     <ClCompile Include="src\main.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\application.h" />
-    <ClInclude Include="include\emu_cpu.h" />
-    <ClInclude Include="include\emu_cpu_helper.h" />
-    <ClInclude Include="include\emu_gpu.h" />
+    <ClInclude Include="include\cpu.h" />
+    <ClInclude Include="include\ppu.h" />
     <ClInclude Include="include\graphics.h" />
     <ClInclude Include="include\macros.h" />
   </ItemGroup>

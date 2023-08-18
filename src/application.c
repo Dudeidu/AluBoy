@@ -11,8 +11,8 @@
 #include <SDL_opengl.h>
 
 #include "graphics.h"
-#include "emu_cpu.h"
-#include "emu_gpu.h"
+#include "cpu.h"
+#include "ppu.h"
 
 
 SDL_Window* window = NULL;
@@ -20,10 +20,9 @@ SDL_Event   window_event;
 const Uint8* kb_state;
 
 int         fps = 60.0;
-float       tick_rate = 60.0 / 60.0; // Milliseconds per frame
+float       tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 int         window_scale = 4;
-u8          redraw_flag = 1;
 
 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -129,7 +128,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/01-special.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/cpu_instrs.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -140,7 +139,7 @@ int application_init(const char* title) {
     }
 
     // Initialize emulator cpu
-    if (emu_cpu_init(rom_buffer) == -1)
+    if (cpu_init(rom_buffer) == -1)
     {
         graphics_cleanup();
         SDL_DestroyWindow(window);
@@ -149,9 +148,9 @@ int application_init(const char* title) {
     }
 
     // Initialize emulator gpu
-    if (emu_gpu_init() == -1)
+    if (ppu_init() == -1)
     {
-        emu_cpu_cleanup();
+        cpu_cleanup();
         graphics_cleanup();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -181,11 +180,9 @@ void application_update() {
 
             case SDL_MOUSEMOTION:
             {
-                int x = window_event.motion.x / window_scale;
-                int y = window_event.motion.y / window_scale;
+                //int x = window_event.motion.x / window_scale;
+                //int y = window_event.motion.y / window_scale;
                 //printf("%d,%d\n", x, y);
-                emu_gpu_set_pixel(x, y, 1);
-                redraw_flag = 1;
             }
             break;
             case SDL_KEYDOWN:
@@ -204,9 +201,6 @@ void application_update() {
             kb_state[SDL_SCANCODE_A],
             kb_state[SDL_SCANCODE_S]
         };
-
-        // todo optimization: batch events (like keyboard inputs) together and only after
-        // all events are polled process the inputs.
 
         // Stalls the program when its running too fast
         current_time = SDL_GetTicks();
@@ -231,7 +225,7 @@ void application_update() {
         timer_total += tick_rate;
 
         // Update cpu logic
-        emu_cpu_update(&inputs);
+        cpu_update(&inputs);
 
         // Draw
         application_draw();
@@ -241,17 +235,17 @@ void application_update() {
 }
 
 void application_draw() {
-    if (!emu_gpu_get_redraw_flag()) return; // Only draws when necessary
+    if (!ppu_get_redraw_flag()) return; // Only draws when necessary
 
-    graphics_update_rgba_buffer(emu_gpu_get_pixel_buffer());
+    graphics_update_rgba_buffer(ppu_get_pixel_buffer());
     graphics_draw(window);
 
-    emu_gpu_set_redraw_flag(0);
+    ppu_set_redraw_flag(0);
 }
 
 void application_cleanup() {
-    emu_cpu_cleanup();
-    emu_gpu_cleanup();
+    cpu_cleanup();
+    ppu_cleanup();
     graphics_cleanup();
     if (window) SDL_DestroyWindow(window);
     SDL_Quit();

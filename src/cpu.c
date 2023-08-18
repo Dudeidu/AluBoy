@@ -2,18 +2,63 @@
 /// Emulates the Game Boy's DMG/CGB-CPU 
 /// </summary>
 
-#include "emu_cpu.h"
+#include "cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "alu_binary.h"
-#include "emu_cpu_helper.h"
+#include "emu_shared.h"
 #include "macros.h"
 
-#include "emu_gpu.h"
+#include "ppu.h"
 
+// Determines how many CPU cycles each instruction takes to perform
+u8 op_cycles_lut[]  = {
+     4,12, 8, 8, 4, 4, 8, 4,20, 8, 8, 8, 4, 4, 8, 4,
+     4,12, 8, 8, 4, 4, 8, 4,12, 8, 8, 8, 4, 4, 8, 4,
+     8,12, 8, 8, 4, 4, 8, 4, 8, 8, 8, 8, 4, 4, 8, 4,
+     8,12, 8, 8,12,12,12, 4, 8, 8, 8, 8, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     8, 8, 8, 8, 8, 8, 4, 8, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+     8,12,12,16,12,16, 8,16, 8,16,12, 4,12,24, 8,16,
+     8,12,12, 0,12,16, 8,16, 8,16,12, 0,12, 0, 8,16,
+    12,12, 8, 0, 0,16, 8,16,16, 4,16, 0, 0, 0, 8,16,
+    12,12, 8, 4, 0,16, 8,16,12, 8,16, 4, 0, 0, 8,16
+};
+// DMG boot rom
+u8 boot_rom[]       = { 
+    0x31, 0xFE, 0xFF, 0xAF, 0x21, 0xFF, 0x9F, 0x32, 0xCB, 0x7C, 0x20, 0xFB, 0x21, 0x26, 0xFF, 0x0E,
+    0x11, 0x3E, 0x80, 0x32, 0xE2, 0x0C, 0x3E, 0xF3, 0xE2, 0x32, 0x3E, 0x77, 0x77, 0x3E, 0xFC, 0xE0,
+    0x47, 0x11, 0x04, 0x01, 0x21, 0x10, 0x80, 0x1A, 0xCD, 0x95, 0x00, 0xCD, 0x96, 0x00, 0x13, 0x7B,
+    0xFE, 0x34, 0x20, 0xF3, 0x11, 0xD8, 0x00, 0x06, 0x08, 0x1A, 0x13, 0x22, 0x23, 0x05, 0x20, 0xF9,
+    0x3E, 0x19, 0xEA, 0x10, 0x99, 0x21, 0x2F, 0x99, 0x0E, 0x0C, 0x3D, 0x28, 0x08, 0x32, 0x0D, 0x20,
+    0xF9, 0x2E, 0x0F, 0x18, 0xF3, 0x67, 0x3E, 0x64, 0x57, 0xE0, 0x42, 0x3E, 0x91, 0xE0, 0x40, 0x04,
+    0x1E, 0x02, 0x0E, 0x0C, 0xF0, 0x44, 0xFE, 0x90, 0x20, 0xFA, 0x0D, 0x20, 0xF7, 0x1D, 0x20, 0xF2,
+    0x0E, 0x13, 0x24, 0x7C, 0x1E, 0x83, 0xFE, 0x62, 0x28, 0x06, 0x1E, 0xC1, 0xFE, 0x64, 0x20, 0x06,
+    0x7B, 0xE2, 0x0C, 0x3E, 0x87, 0xE2, 0xF0, 0x42, 0x90, 0xE0, 0x42, 0x15, 0x20, 0xD2, 0x05, 0x20,
+    0x4F, 0x16, 0x20, 0x18, 0xCB, 0x4F, 0x06, 0x04, 0xC5, 0xCB, 0x11, 0x17, 0xC1, 0xCB, 0x11, 0x17,
+    0x05, 0x20, 0xF5, 0x22, 0x23, 0x22, 0x23, 0xC9, 0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
+    0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
+    0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
+    0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E, 0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C,
+    0x21, 0x04, 0x01, 0x11, 0xA8, 0x00, 0x1A, 0x13, 0xBE, 0x20, 0xFE, 0x23, 0x7D, 0xFE, 0x34, 0x20,
+    0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50
+};
+
+// Define shared memory between the CPU and PPU
+u8  reg[0x100];     // Refers to Register enum
+u8  vram[2 * BANKSIZE_VRAM];
+u8  oam[0xA0];
+u8  cpu_mode;       // vblank/hblank/oam search/pixel rendering...
+u8  interrupts_enabled; // IME flag
 
 // Hardware registers
 u8  A;              // Accumulator
@@ -27,18 +72,11 @@ BytePair HL;
 BytePair SP;        // Stack Pointer
 u16 PC;             // Program Counter/Pointer
 
-u8 cpu_mode;
-
-// Memory-mapped registers
-u8  reg[0x100];     // Refers to Register enum
-u8  rtc[0xD];       // Refers to RTCRegister enum
-
-// Memory banks
+// CPU specific memory
 u8* rom  = NULL;    // loaded from .gb / .gbc
 u8* eram = NULL;    // external ram (cartridge)
-u8  vram[2 * BANKSIZE_VRAM];
 u8  wram[8 * BANKSIZE_ROM];
-u8  oam[0xA0];
+u8  rtc[0xD];       // Refers to RTCRegister enum
 u8  hram[0x80];
 u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
 u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
@@ -50,13 +88,7 @@ u8  timer_enabled;  // bit  2   of reg TAC
 u16 timer_speed;    // bits 0-1 of reg TAC
 u16 timer_counter;  // every >timer_speed, TIMA++
 
-// Interrupts
-u8 interrupts_enabled; // IME flag
-u8 halted;
-
-// Graphics
-u16 scanline_counter; // every >SCANLINE_DOTS, update LY
-
+u8  halted;
 
 // Header information
 unsigned char title[17]; // 16 + '\0'
@@ -369,7 +401,7 @@ int power_up()
     return 0;
 }
 
-int emu_cpu_init(u8* rom_buffer)
+int cpu_init(u8* rom_buffer)
 {
     // Lookup tables for cart type
     u8 mbc_lut[] = {
@@ -491,8 +523,8 @@ u8 read(u16 addr)
         case 0x8:
         case 0x9:
             // VRAM
-            if (cgb_flag)   return vram[(addr & 0x1FF) + (reg[REG_VBK] * BANKSIZE_VRAM)];
-            else            return vram[addr & 0x1FF];
+            if (cgb_flag)   return vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)];
+            else            return vram[addr - MEM_VRAM];
             break;
         case 0xA:
         case 0xB:
@@ -722,8 +754,8 @@ int write(u16 addr, u8 value)
             case 0x8:
             case 0x9:
                 // VRAM
-                if (cgb_flag)   vram[(addr & 0x1FF) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
-                else            vram[addr & 0x1FF] = value;
+                if (cgb_flag)   vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
+                else            vram[addr - MEM_VRAM] = value;
                 break;
             case 0xA:
             case 0xB:
@@ -2772,103 +2804,6 @@ void update_timers(u8 cycles) {
 
 }
 
-void update_graphics(u8 cycles) {
-    u8 clock = cycles;
-
-    scanline_counter += clock;
-    // Reached end of scanline
-    if (scanline_counter > SCANLINE_DOTS) {
-        scanline_counter -= clock;
-
-        // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
-        reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
-        if (reg[REG_LYC] && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
-        {
-            // request interrupt
-            SET_BIT(reg[REG_IF], INT_BIT_STAT);
-        }
-        // Move to a new scanline
-        // DEBUG stubbed to 0x90
-        //reg[REG_LY] = 0x90;
-        reg[REG_LY] ++;
-        if (reg[REG_LY] >= 0x9A) reg[REG_LY] = 0;
-
-        // VBlank
-        if (reg[REG_LY] == SCREEN_HEIGHT) {
-            //printf("VBlank start...\n");
-            // change lcd mode to vblank
-            SET_BIT(reg[REG_STAT], LCD_MODE_VBLANK);
-            // request interrupt if enabled
-            if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
-                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
-            }
-        }
-        // HBlank
-        else if (reg[REG_LY] < SCREEN_HEIGHT) {
-            // change lcd mode to hblank
-            SET_BIT(reg[REG_STAT], LCD_MODE_HBLANK);
-            // request interrupt if enabled
-            if (GET_BIT(reg[REG_STAT], STAT_INT_HBLANK)) {
-                SET_BIT(reg[REG_IF], INT_BIT_STAT);
-            }
-
-            // HBLANK HDMA
-
-            // DEBUG Draw entire line //////////////////////////////
-            {
-                u8 y    = reg[REG_LY]-1;
-                u8 row  = y % 8;
-                u8 sy   = y + reg[REG_SCY]; // scroll y
-                u8 ypos = ((sy >> 3) << 5);
-
-                u8 td_area_flag = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
-                u16 bg_tm_area  = GET_BIT(reg[REG_LCDC], LCDC_BG_TILEMAP_AREA) ? 0x9C00 : 0x9800;
-
-                for (u8 x = 0; x < SCREEN_WIDTH; x++) {
-                    u16 td_addr;
-                    u8 byte1, byte2, color_index;
-                    u8 sx       = x + reg[REG_SCX]; // scroll x
-                    u8 xpos     = (sx >> 3);
-                    
-                    u8 col      = x % 8;
-                    u16 tm_addr = bg_tm_area + ypos + xpos; // ((row / 8) * 32) + (col / 8)
-                    int tile_index;
-
-                    if (td_area_flag) tile_index = read(tm_addr);
-                    else tile_index = (s8)read(tm_addr);
-
-                    // Get tile data
-                    if (td_area_flag == 1) {
-                        // unsigned addressing
-                        td_addr = 0x8000 + (tile_index * 16);
-                    }
-                    else {
-                        // signed addressing (0-127 are in block 2, -128 to -1 are in block 1)
-                        td_addr = 0x9000 + ((tile_index+128) * 16);
-                    }
-                    // Get pixel info
-                    byte1 = read(td_addr + (row * 2));      // represents lsb of the color_index of each pixel
-                    byte2 = read(td_addr + (row * 2) + 1);  // represents msb of the color_index of each pixel
-                    color_index = (GET_BIT(byte2, 7 - col) << 1) | GET_BIT(byte1, 7 - col);
-                    emu_gpu_set_pixel(x, y, color_index);
-                }
-
-                emu_gpu_set_redraw_flag(1);
-                //printf("\n");
-            }
-            
-        }
-    }
-    // OAM access
-
-    //
-    else {
-        // get pixel coordinate
-
-    }
-    // ...
-}
-
 void do_interrupts() {
     if (!interrupt_is_pending()) return;
 
@@ -2911,7 +2846,7 @@ void do_interrupts() {
 }
 
 int counter = 1;
-void emu_cpu_update(u8* inputs)
+void cpu_update(u8* inputs)
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
@@ -2948,7 +2883,7 @@ void emu_cpu_update(u8* inputs)
         cycles_this_update += cycles;
 
         update_timers(cycles);
-        update_graphics(cycles);
+        ppu_update(cycles);
         do_interrupts();
 
         
@@ -2962,7 +2897,7 @@ void emu_cpu_update(u8* inputs)
     }
 }
 
-void emu_cpu_cleanup()
+void cpu_cleanup()
 {
     if (rom) free(rom);
     if (eram) free(eram);
