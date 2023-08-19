@@ -1,5 +1,7 @@
 #include "graphics.h"
+
 #include "macros.h"
+
 
 SDL_GLContext   m_context;
 GLuint          m_vao, m_vbo, m_ebo, m_tex;
@@ -48,6 +50,7 @@ const SDL_Color palette[] = {
     {134, 194, 112, 255},   // light
     {47, 105, 87, 255},     // dark
     {0, 0, 0, 255},         // black
+
     // ... add more colors to your palette
 };
 
@@ -56,6 +59,8 @@ uint8_t* rgba_buffer = NULL;
 
 int graphics_init(SDL_Window* window)
 {
+    GLenum err;
+
     // Initialize rendering context
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
@@ -73,7 +78,6 @@ int graphics_init(SDL_Window* window)
     //SDL_GL_SetSwapInterval(1); // Use VSYNC
 
     // Initialize GL Extension Wrangler (GLEW)
-    GLenum err;
     glewExperimental = GL_TRUE; // Please expose OpenGL 3.x+ interfaces
     err = glewInit();
     if (err != GLEW_OK) {
@@ -99,8 +103,8 @@ int graphics_init(SDL_Window* window)
 
 int init_shaders()
 {
-    GLint status;
-    char err_buf[512];
+    GLint   status;
+    char    err_buf[512];
 
     GL_CALL( glGenVertexArrays(1, &m_vao) );
     GL_CALL( glBindVertexArray(m_vao) );
@@ -142,6 +146,8 @@ int init_shaders()
 
 int init_geometry()
 {
+    GLint pos_attr_loc, tex_attr_loc;
+
     // Populate vertex buffer
     GL_CALL( glGenBuffers(1, &m_vbo) );
     GL_CALL( glBindBuffer(GL_ARRAY_BUFFER, m_vbo) );
@@ -153,12 +159,12 @@ int init_geometry()
     GL_CALL( glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indicies), indicies, GL_STATIC_DRAW));
 
     // Bind vertex position attribute
-    GLint pos_attr_loc = glGetAttribLocation(m_shader_prog, "in_Position");
+    pos_attr_loc = glGetAttribLocation(m_shader_prog, "in_Position");
     GL_CALL( glVertexAttribPointer(pos_attr_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void*)0) );
     GL_CALL( glEnableVertexAttribArray(pos_attr_loc) );
 
     // Bind vertex texture coordinate attribute
-    GLint tex_attr_loc = glGetAttribLocation(m_shader_prog, "in_Texcoord");
+    tex_attr_loc = glGetAttribLocation(m_shader_prog, "in_Texcoord");
     GL_CALL( glVertexAttribPointer(tex_attr_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void*)(2 * sizeof(GLfloat))) );
     GL_CALL( glEnableVertexAttribArray(tex_attr_loc) );
 
@@ -179,6 +185,7 @@ int init_textures()
     GL_CALL(glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, rgba_buffer) );
     GL_CALL( glEnable(GL_BLEND) );
     GL_CALL( glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA) );
+    
     return 1;
 }
 
@@ -204,11 +211,11 @@ void graphics_cleanup()
 int create_rgba_buffer()
 {
     // The actual colors (each pixel gets 4 bytes: r,g,b,a)
-    rgba_buffer = (uint8_t*)calloc(SCREEN_WIDTH * SCREEN_HEIGHT * 4, sizeof(uint8_t));
+    rgba_buffer = (u8*)calloc(SCREEN_WIDTH * SCREEN_HEIGHT * 4, sizeof(u8));
     //rgba_buffer = (uint8_t*)malloc(160 * 144 * 4);
     if (rgba_buffer == NULL)
     {
-        printf("Failed to allocate memory for the rgba buffer!\n");
+        fprintf(stderr, "Failed to allocate memory for the rgba buffer!\n");
         return -1;
     }
     return 0;
@@ -221,15 +228,18 @@ int8_t* graphics_get_pixel_buffer()
 }
 */
 
-void graphics_update_rgba_buffer(int8_t* color_index_buffer)
+void graphics_update_rgba_buffer(u8* color_index_buffer)
 {
     // Iterate through a buffer of color_index and update the rgba buffer
     // with the corresponding colors from the palette
-    int16_t buffer_size = SCREEN_WIDTH * SCREEN_HEIGHT;
+    int16_t     buffer_size = SCREEN_WIDTH * SCREEN_HEIGHT;
+    SDL_Color   color;
+    int         pos;
 
     for (int i = 0; i < buffer_size; i++) {
-        SDL_Color color = palette[color_index_buffer[i]];
-        int pos = i * 4;
+        pos = i * 4;
+        color = palette[color_index_buffer[i]];
+
         rgba_buffer[pos]     = color.r;
         rgba_buffer[pos + 1] = color.g;
         rgba_buffer[pos + 2] = color.b;
