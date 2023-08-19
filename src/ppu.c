@@ -53,20 +53,6 @@ int ppu_init()
     }
 
     redraw_flag = 1;
-
-    // Debug
-    /*
-    for (int i = 0; i < buffer_size; i++)
-    {
-        sprite_buffer[i] = i % 4;
-    }
-
-    // Debug tile
-    u8 tile_data[] = {
-        0xFF, 0x00, 0x7E, 0xFF, 0x85, 0x81, 0x89, 0x83, 0x93, 0x85, 0xA5, 0x8B, 0xC9, 0x97, 0x7E, 0xFF
-    };
-    ppu_draw_tile(10, 10, tile_data, 5);
-    */
     return 0;
 }
 
@@ -88,10 +74,11 @@ void ppu_update(u8 cycles)
 {
     u8 clock = cycles;
 
+    //printf("%d,", reg[REG_STAT]);
     scanline_counter += clock;
     // Reached end of scanline
     if (scanline_counter > SCANLINE_DOTS) {
-        scanline_counter -= clock;
+        scanline_counter -= SCANLINE_DOTS;
 
         // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
         reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
@@ -108,16 +95,20 @@ void ppu_update(u8 cycles)
         if (reg[REG_LY] == SCREEN_HEIGHT) {
             //printf("VBlank start...\n");
             // change lcd mode to vblank
-            SET_BIT(reg[REG_STAT], LCD_MODE_VBLANK);
+            //SET_BIT(reg[REG_STAT], LCD_MODE_VBLANK);
+
+            // Vblank interrupt request
+            SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+
             // request interrupt if enabled
             if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
-                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+                SET_BIT(reg[REG_IF], INT_BIT_STAT);
             }
         }
         // HBlank
         else if (reg[REG_LY] < SCREEN_HEIGHT) {
             // change lcd mode to hblank
-            SET_BIT(reg[REG_STAT], LCD_MODE_HBLANK);
+            //SET_BIT(reg[REG_STAT], LCD_MODE_HBLANK);
             // request interrupt if enabled
             if (GET_BIT(reg[REG_STAT], STAT_INT_HBLANK)) {
                 SET_BIT(reg[REG_IF], INT_BIT_STAT);
@@ -128,6 +119,7 @@ void ppu_update(u8 cycles)
             // DEBUG Draw entire line //////////////////////////////
             draw_scanline(reg[REG_LY] == 0 ? (SCREEN_HEIGHT - 1) : (reg[REG_LY] - 1));
         }
+        //printf("%d,", reg[REG_LY]);
     }
     // OAM access
 
@@ -240,7 +232,56 @@ void draw_tiles(u8 y) {
 }
 
 void draw_sprites(u8 y) {
+    u8 lcdc = reg[REG_LCDC];
+    u8 is_big = GET_BIT(lcdc, LCDC_OBJ_SZ); // 8x16 sprites
+    u8 height = is_big ? 16 : 8;
 
+    // iterate through all sprites, draw if pixel intercects with our scanline
+    for (u8 spr = 0; spr < 40; spr++) {
+        u8 index        = spr << 2; // spr * 4
+        u8 ypos         = oam[index    ];
+        u8 xpos         = oam[index + 1];
+        u8 tile_index   = oam[index + 2];
+        u8 attr         = oam[index + 3];
+        u8 flip_x, flip_y;
+
+        u8 pixel_updated = 0;
+
+        u8 byte1, byte2;
+        u8 color_index;
+        u16 pixel_offset;
+        short ty = (y - (ypos - 16)); // the sprite line to draw
+
+        // check if outside screen
+        if (ypos == 0 || ypos >= 160) { continue; }
+        if (xpos == 0 || xpos >= 168) { continue; }
+
+        // check if intersecting
+        if (ty < 0 || ty >= height) continue;
+
+        flip_x = GET_BIT(attr, OAM_X_FLIP);
+        flip_y = GET_BIT(attr, OAM_Y_FLIP);
+
+        if (flip_y) ty = height - ty;
+        
+        // get pixel info
+        pixel_offset = (tile_index * 16) + (ty * 2); // each tile takes 16 bytes (8x8x2BPP), each row of pixels is 2 bytes (2BPP)
+        byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
+        byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+
+        for (s8 x = 7; x >= 0; x--) {
+            u8 px = (xpos - 8) + (flip_x ? x : (7 - x)); // Horizontal flip
+            if (px >= SCREEN_WIDTH || px < 0) continue; // boundary check
+
+            color_index = (GET_BIT(byte2, x) << 1) | GET_BIT(byte1, x);
+            if (color_index == 0) continue; // white is transparent for sprites
+            pixel_updated = set_pixel(px + (y * SCREEN_WIDTH), color_index);
+            
+            // tell screen to redraw at the next step
+            if (!redraw_flag && pixel_updated) redraw_flag = 1;
+        }
+
+    }
 }
 
 

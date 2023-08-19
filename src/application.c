@@ -19,8 +19,8 @@ SDL_Window* window = NULL;
 SDL_Event   window_event;
 const Uint8* kb_state;
 
-int         fps = 60.0;
-float       tick_rate = 1000.0 / 60.0; // Milliseconds per frame
+int         fps = 60;
+double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 int         window_scale = 4;
 
@@ -128,7 +128,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/cpu_instrs.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Tetris (World) (Rev 1).gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -163,11 +163,11 @@ int application_init(const char* title) {
 
 void application_update() {
     
-    u32  current_time     = 0;
-    u32  delta            = 0;
-    u32  timer_total      = 0; // Total game time
-    u32  last_frame_time  = SDL_GetTicks(); // Set to current time when difference is bigger than 1/60
-    u8   keep_window_open = 1;
+    u32   current_time      = 0;
+    u32   delta             = 0;
+    double timer_total       = 0; // Total game time
+    u32   last_frame_time   = SDL_GetTicks(); // Set to current time when difference is bigger than 1/60
+    u8    keep_window_open  = 1;
 
     while (keep_window_open) {
 
@@ -210,7 +210,7 @@ void application_update() {
 
         if (tick_rate > delta)
         {
-            SDL_Delay(tick_rate - delta);
+            SDL_Delay((u32)(tick_rate - delta));
             //printf("under: %d\n", (int)tick_rate - delta);
         }
         else
@@ -225,7 +225,7 @@ void application_update() {
         timer_total += tick_rate;
 
         // Update cpu logic
-        cpu_update(&inputs);
+        cpu_update((u8*) &inputs);
 
         // Draw
         application_draw();
