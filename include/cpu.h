@@ -7,7 +7,7 @@
 
 int cpu_init(u8* rom_buffer);
 
-void cpu_update(u8* inputs);
+void cpu_update();
 
 void cpu_cleanup();
 

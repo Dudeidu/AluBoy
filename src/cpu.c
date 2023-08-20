@@ -12,8 +12,6 @@
 #include "emu_shared.h"
 #include "macros.h"
 
-#include "ppu.h"
-
 // Determines how many CPU cycles each instruction takes to perform
 u8 op_cycles_lut[]  = {
      4,12, 8, 8, 4, 4, 8, 4,20, 8, 8, 8, 4, 4, 8, 4,
@@ -34,7 +32,7 @@ u8 op_cycles_lut[]  = {
     12,12, 8, 4, 0,16, 8,16,12, 8,16, 4, 0, 0, 8,16
 };
 // DMG boot rom
-u8 boot_rom[]       = { 
+u8 boot_rom[] = { 
     0x31, 0xFE, 0xFF, 0xAF, 0x21, 0xFF, 0x9F, 0x32, 0xCB, 0x7C, 0x20, 0xFB, 0x21, 0x26, 0xFF, 0x0E,
     0x11, 0x3E, 0x80, 0x32, 0xE2, 0x0C, 0x3E, 0xF3, 0xE2, 0x32, 0x3E, 0x77, 0x77, 0x3E, 0xFC, 0xE0,
     0x47, 0x11, 0x04, 0x01, 0x21, 0x10, 0x80, 0x1A, 0xCD, 0x95, 0x00, 0xCD, 0x96, 0x00, 0x13, 0x7B,
@@ -52,12 +50,8 @@ u8 boot_rom[]       = {
     0x21, 0x04, 0x01, 0x11, 0xA8, 0x00, 0x1A, 0x13, 0xBE, 0x20, 0xFE, 0x23, 0x7D, 0xFE, 0x34, 0x20,
     0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50
 };
-// Last input retrieved
-u8 inputs[8];
-u8 inputs_direction;
-u8 inputs_action;
 
-// Define shared memory between the CPU and PPU
+// Define shared memory
 u8  reg[0x100];     // Refers to Register enum
 u8  vram[2 * BANKSIZE_VRAM];
 u8  oam[0xA0];
@@ -128,7 +122,6 @@ u8 test_finished = 0;
 
 // Forward declarations
 void tick();
-void update_inputs();
 void update_timers(u8 cycles);
 u8 do_interrupts();
 
@@ -308,6 +301,7 @@ void test_bit(u8* a, u8 b) {
 u8 interrupt_is_pending() {
     return (((reg[REG_IE] & 0x1F) & (reg[REG_IF] & 0x1F)) != 0);
 }
+
 
 int power_up()
 {
@@ -573,7 +567,14 @@ u8 read(u16 addr)
             }
             // I/O Registers
             else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                return reg[addr - MEM_IO];   // Convert to range 0-255
+                switch (addr & 0xFF) {
+                    case REG_SB:
+                        return 0xFF;
+                    case REG_P1:
+                        return reg[REG_P1];
+                    default:
+                        return reg[addr - MEM_IO];   // Convert to range 0-255
+                }
             }
             // High RAM
             else if (addr >= MEM_HRAM && addr < MEM_IE) {
@@ -590,7 +591,6 @@ u8 read(u16 addr)
 int write(u16 addr, u8 value)
 {
     // TODO - I/O register writing rules
-
     u8 msb = (u8)(addr >> 12);
     // MBC Registers
     if (msb < 0x8) {
@@ -809,7 +809,8 @@ int write(u16 addr, u8 value)
                 else if (addr >= MEM_IO && addr < MEM_HRAM) {
                     switch (addr & 0xFF) {
                         case REG_P1:
-                            reg[addr & 0xFF] = value;
+                            // only change bits 4 and 5 (rest are read-only)
+                            reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
                             break;
                         case REG_DIV:
                             reg[REG_DIV] = 0;
@@ -1739,9 +1740,9 @@ u8 execute_cb(u8 op) {
 
 void tick() {
     u8 cycles = 4 >> double_speed;
-    update_inputs();
+    input_tick();
     update_timers(cycles);
-    ppu_update(double_speed ? (cycles >> 1) : cycles);
+    ppu_tick(double_speed ? (cycles >> 1) : cycles);
 }
 
 u8 execute_instruction(u8 op) {
@@ -2832,59 +2833,6 @@ u8 execute_instruction(u8 op) {
     return cycles;
 }
 
-// Updates the P1/JOYP register with the current inputs.
-void update_inputs() {
-    // inputs[8] array is sent from SDL once every frame
-    //   3      2       1       0 
-    // down    up     left    right
-    //   7      6       5       4     
-    // start  select    B       A 
-    // 
-    // 1 = pressed, 0 = unpressed
-    // need to flip the inputs we got from SDL since the input signals here are reversed
-    u8 select_direction = !GET_BIT(reg[REG_P1], 4);
-    u8 select_action    = !GET_BIT(reg[REG_P1], 5);
-
-    //if (inputs_action != 15) printf("%d", inputs_action);
-    //if (inputs_direction != 15) printf("%d", inputs_direction);
-    //printf("% 2X,", reg[REG_P1]);
-    u8 inputs_prev = reg[REG_P1];
-
-    if (select_direction && select_action) { // AND layouts when both are selected
-        reg[REG_P1] = 0xC0; // 0b 1100 ????
-    }
-    else if (select_action && !select_direction) {
-        reg[REG_P1] = 0xD0; // 0b 1101 ????
-    }
-    else if (select_direction && !select_action) {
-        reg[REG_P1] = 0xE0; // 0b 1110 ????
-    }
-    else { 
-        reg[REG_P1] = 0xFF; // 0b 0011 1111
-    }
-
-    if (select_direction) {
-        reg[REG_P1] |= inputs_direction;
-    }
-    if (select_action) {
-        reg[REG_P1] |= inputs_action;
-    }
-
-    
-
-    // The Joypad interrupt is requested when any of P1 bits 0-3 change from High to Low
-    // Indicating that a button was pressed
-    for (u8 i=0; i<=3; i++) { 
-        if (GET_BIT(inputs_prev, i) && !GET_BIT(reg[REG_P1], i)) {
-            // Joypad interrupt
-            SET_BIT(reg[REG_IF], INT_BIT_JOYPAD);
-            printf("%d", reg[REG_P1]);
-            printf("int request: joypad\n");
-            break;
-        }
-    }
-}
-
 void update_timers(u8 cycles) {
     u8 clock = (cycles);
 
@@ -2934,10 +2882,12 @@ u8 do_interrupts() {
     if (interrupts_enabled) {
         // Interrupt priority
         for (u8 i = 0; i <= 4; i++) {
-            if (GET_BIT(reg[REG_IF], i) & GET_BIT(reg[REG_IE], i)) {
+            if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
                 RESET_BIT(reg[REG_IF], i);
                 interrupts_enabled = 0;
-
+                if (i == 4) {
+                    u8 i = 0;
+                }
                 // CALL interrupt vector
                 // push PC onto stack, then jump to address
                 tick();
@@ -2949,7 +2899,7 @@ u8 do_interrupts() {
                     case 1: PC = INT_VEC_STAT;   break;// printf("st\n");break;
                     case 2: PC = INT_VEC_TIMER;  break;// printf("tm\n");break;
                     case 3: PC = INT_VEC_SERIAL; break;// printf("sr\n");break;
-                    case 4: PC = INT_VEC_JOYPAD; break;// printf("jp\n");break;
+                    case 4: PC = INT_VEC_JOYPAD; printf("jp\n");break;
                 }
                 tick();
                 cycles = 20;
@@ -2966,23 +2916,17 @@ u8 do_interrupts() {
 }
 
 int counter = 1;
-void cpu_update(u8* in)
+void cpu_update()
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
     int cycles_this_update = 0;
 
-    // Updates inputs array
-    memcpy(inputs, in, 8);
-    inputs_direction = ((!inputs[3] << 3) | (!inputs[2] << 2) | (!inputs[1] << 1) | (!inputs[0] << 0));
-    inputs_action    = ((!inputs[7] << 3) | (!inputs[6] << 2) | (!inputs[5] << 1) | (!inputs[4] << 0));
-    
     while (cycles_this_update < MAXDOTS)
     {
-        
         u8 show_logs = 0;
         if (show_logs) {
-            if (counter > 0 && counter < 4000)
+            //if (counter > 0 && counter < 4000)
             {
                 printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X\n",
                     counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
@@ -3021,9 +2965,6 @@ void cpu_update(u8* in)
         else {
             if (halted) op = 0x00; // NOOP
             else op = read(PC++);
-            if (halted) {
-                u8 i = 0;
-            }
             tick();
 
             cycles = execute_instruction(op);
@@ -3035,13 +2976,14 @@ void cpu_update(u8* in)
         cycles_this_update += (cycles >> double_speed);
         
         // handle pending interrupts after every instruction
-        
+        /*
         // blarggs test - serial output
         if (reg[REG_SC] == 0x81) {
             char c = reg[REG_SB];
             printf("%c", c);
             reg[REG_SC] = 0x0;
         }
+        */
         
     }
 }

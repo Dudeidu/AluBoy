@@ -13,6 +13,7 @@
 #include "graphics.h"
 #include "cpu.h"
 #include "ppu.h"
+#include "input.h"
 
 
 SDL_Window* window = NULL;
@@ -128,7 +129,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Tetris (World) (Rev 1).gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/tests/dmg-acid2/dmg-acid2.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -225,7 +226,8 @@ void application_update() {
         timer_total += tick_rate;
 
         // Update cpu logic
-        cpu_update((u8*) &inputs);
+        input_update((u8*)&inputs);
+        cpu_update();
 
         // Draw
         application_draw();

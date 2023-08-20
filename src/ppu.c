@@ -2,6 +2,8 @@
 #include "macros.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "emu_shared.h"
 
 #define PIXELS_PER_BYTE 1
@@ -70,7 +72,7 @@ void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
 }
 
-void ppu_update(u8 cycles)
+void ppu_tick(u8 cycles)
 {
     u8 clock = cycles;
 
@@ -89,7 +91,16 @@ void ppu_update(u8 cycles)
         }
         // Move to a new scanline
         reg[REG_LY] ++;
-        if (reg[REG_LY] >= 0x9A) reg[REG_LY] = 0;
+        if (reg[REG_LY] >= 0x9A) {
+            reg[REG_LY] = 0;
+
+            input_updated = 0;
+        }
+
+        // Update inputs at a different LY each frame to avoid detection
+        if (!input_updated) {
+            input_joypad_update();
+        }
 
         // VBlank
         if (reg[REG_LY] == SCREEN_HEIGHT) {
@@ -209,7 +220,7 @@ void draw_tiles(u8 y) {
         if (tm_addr_prev != tm_addr) {
             tm_addr_prev = tm_addr;
             if (td_area_flag) tile_index = vram[tm_addr - vram_offset];
-            else tile_index = (s8)vram[tm_addr - vram_offset] + 128;
+            else tile_index = (s8)vram[tm_addr - vram_offset];
 
             if (tile_index != tile_index_prev) {
                 tile_index_prev = tile_index;
