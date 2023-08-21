@@ -129,7 +129,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/tests/dmg-acid2/dmg-acid2.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
@@ -165,12 +165,33 @@ int application_init(const char* title) {
 void application_update() {
     
     u32   current_time      = 0;
-    u32   delta             = 0;
+    double   delta             = 0;
     double timer_total       = 0; // Total game time
     u32   last_frame_time   = SDL_GetTicks(); // Set to current time when difference is bigger than 1/60
     u8    keep_window_open  = 1;
 
+    // DEBUG FPS calculation
+    u32 total_frames = 0;
+    u32 start_time = SDL_GetTicks();
+
     while (keep_window_open) {
+
+        current_time = SDL_GetTicks();
+        delta += current_time - last_frame_time;
+        if (delta > 100) delta = 100.0;
+        last_frame_time = current_time;
+
+        // Stalls the program when its running too fast
+        if (tick_rate > delta) {
+            SDL_Delay(tick_rate - delta);
+        }
+        // Alternative: More accurate, but cpu works harder since it never sleeps
+        //if (tick_rate > delta) continue; 
+
+        delta -= tick_rate;
+
+        ////////////////////////////////////////////
+        // This part of the code aims to execute at ~60 fps
 
         // Poll events while queue isn't empty (uses a filter, see EventFilter function)
         while (SDL_PollEvent(&window_event)) {
@@ -203,36 +224,35 @@ void application_update() {
             kb_state[SDL_SCANCODE_S]
         };
 
-        // Stalls the program when its running too fast
-        current_time = SDL_GetTicks();
-        delta = current_time - last_frame_time;
-        if (delta > 100) delta = 100;
-        last_frame_time = current_time;
-
-        if (tick_rate > delta)
-        {
-            SDL_Delay((u32)(tick_rate - delta));
-            //printf("under: %d\n", (int)tick_rate - delta);
-        }
-        else
-        {
-            //printf("over: %d\n", delta - (int)tick_rate);
-        }
-
-        ////////////////////////////////////////////
-        // This part of the code aims to execute at ~60 fps
-
         // Update frame logic
         timer_total += tick_rate;
 
-        // Update cpu logic
         input_update((u8*)&inputs);
+        // Update cpu logic
         cpu_update();
 
         // Draw
         application_draw();
 
-        last_frame_time = current_time;
+
+
+        // DEBUG FPS calculation
+        total_frames++;
+        // At the end of your loop:
+        u32 end_time = SDL_GetTicks();
+        u32 elapsed_time = end_time - start_time;
+        if (elapsed_time > 1000) {
+            start_time = end_time;
+            total_frames = 0;
+        }
+        // Calculate average FPS
+        double average_fps = total_frames / (elapsed_time / 1000.0); // Divide by 1000 to convert milliseconds to seconds
+        // Print or use the average_fps value as needed
+        if (total_frames > 0 && total_frames % 20 == 0) {
+            char str[10];
+            sprintf(str, "%d", (u32)average_fps);
+            SDL_SetWindowTitle(window, str);
+        }
     }
 }
 

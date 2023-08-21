@@ -19,7 +19,6 @@ u16 scanline_counter; // every >SCANLINE_DOTS, update LY
 
 // Drawing optimization
 u16 tm_addr_prev        = 0;
-int tile_index_prev     = 1;
 
 // FORWARD DECLARE
 void draw_scanline(u8 y);
@@ -172,48 +171,91 @@ void draw_scanline(u8 y) {
 
 // Draws the Background & Window
 void draw_tiles(u8 y) {
+    u16 y_screen_width = y * SCREEN_WIDTH;
+    
     u8  sx      = reg[REG_SCX];
     u8  sy      = reg[REG_SCY];
-    u8  wx      = reg[REG_WX];
+    u8  wx      = (reg[REG_WX] - 7) & 0xFF;
     u8  wy      = reg[REG_WY];
 
     u8  td_area_flag    = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
-    u16 bg_tm_area      = GET_BIT(reg[REG_LCDC], LCDC_BG_TILEMAP_AREA) ? 0x9C00 : 0x9800;
-    u16 win_tm_area     = GET_BIT(reg[REG_LCDC], LCDC_W_TILEMAP_AREA) ? 0x9C00 : 0x9800;
     u16 vram_offset     = MEM_VRAM;
 
-    u8  window_in_line = 0;
+    int tile_index_prev = -1;
+    u8  window_in_line  = 0;
+    u8  bg_in_line = 1;
+
     u8  byte1 = 0, byte2 = 0;
-    u8  pixel_updated = 0;
+    u8  row;
     
-    u16 bg_y    = ( ((y + sy) & 0xFF) >> 3) << 5; // translate the background coordinates to the screen ((row / 8) * 32)
-    u16 win_y   = ( ((wy - y) & 0xFF) >> 3) << 5; // translate the window coordinates to the screen
-    u8  row     = y % 8;
+    u16 bg_tm_area;;
+    u16 bg_y; // translate the background coordinates to the screen ((row / 8) * 32)
+    u8  bg_row;
+
+    u16 win_tm_area;
+    u16 win_y; // translate the window coordinates to the screen
+    u8  win_row;
 
     u8  color_index;
     u16 td_addr, pixel_offset;
 
+    /*
+    u16 tile_index_changes = 0;
+    u16 tm_addr_changes = 0;
+    u16 bg_pixels = 0;
+    u16 win_pixels = 0;
+    u16 pixels_updates = 0;
+    */
+
+    //printf("%d,", wy);
     // Check if window is enabled and visible at this scanline
-    if (GET_BIT(reg[REG_LCDC], LCDC_W_ENABLE) && wy <= y) {
+    if (GET_BIT(reg[REG_LCDC], LCDC_W_ENABLE) && wy <= y && wx < SCREEN_WIDTH) {
         window_in_line = 1;
+
+        win_tm_area = GET_BIT(reg[REG_LCDC], LCDC_W_TILEMAP_AREA) ? 0x9C00 : 0x9800;
+        win_y       = ( ((y - wy) & 0xFF) >> 3) << 5;
+        win_row     = ((y - wy) & 0xFF) % 8;
+
+        // Check if window covers the entire background
+        if (wx <= 7 && wy <= 0) {
+            bg_in_line = 0;
+        }
+    }
+    if (bg_in_line) {
+        bg_tm_area      = GET_BIT(reg[REG_LCDC], LCDC_BG_TILEMAP_AREA) ? 0x9C00 : 0x9800;
+        bg_y    = ( ((y + sy) & 0xFF) >> 3) << 5; // translate the background coordinates to the screen ((row / 8) * 32)
+        bg_row  = ((y + sy) & 0xFF) % 8;
     }
 
     for (u8 x = 0; x < SCREEN_WIDTH; x++) {
-        u8 col = x % 8;
+        u8 col;
         u16 tm_addr; 
         u16 xpos, ypos;
+        u16 pixel_pos;
         int tile_index;
         
         // Check whether to display the background or the window
         if (window_in_line && x >= wx) {
             ypos = win_y;
             xpos = ( (x - wx) & 0xFF) >> 3; // (x / 8);
+
+            row = win_row;
+            col = ((x - wx) & 0xFF) % 8;
+
             tm_addr = win_tm_area + ypos + xpos;
+
+            //win_pixels++;
         }
         else {
             ypos = bg_y;
             xpos = ( (x + sx) & 0xFF) >> 3;
+
+            row = bg_row;
+            col = ((x + sx) & 0xFF) % 8;
+
             tm_addr = bg_tm_area + ypos + xpos;
+
+            //bg_pixels++;
         }
 
         // Only fetch new bytes when the tile index / tilemap address has changed
@@ -232,13 +274,32 @@ void draw_tiles(u8 y) {
                 pixel_offset = td_addr + (row * 2) - vram_offset;
                 byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
                 byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+                
+                //tile_index_changes++;
             }
+
+            //tm_addr_changes++;
         }
+        // get color of pixel using the 2BPP method
         color_index = (GET_BIT(byte2, 7 - col) << 1) | GET_BIT(byte1, 7 - col);
 
-        pixel_updated = set_pixel(x + y * SCREEN_WIDTH, color_index);
-        // Tell screen to redraw at the next step
-        if (!redraw_flag && pixel_updated) redraw_flag = 1;
+        // Update pixel color
+        pixel_pos = x + y_screen_width;
+        if (background_buffer[pixel_pos] != color_index) {
+            background_buffer[pixel_pos] = color_index;
+            // Tell screen to redraw at the next step
+            if (!redraw_flag) redraw_flag = 1;
+
+            //pixels_updates++;
+        }
+        
+        /*
+        if (y == 60) {
+            printf("ti: %d, tm: %d, bg: %d, win: %d, pixels: %d\n",
+                tile_index_changes, tm_addr_changes, bg_pixels, win_pixels, pixels_updates);
+        }
+        */
+            
     }
 }
 

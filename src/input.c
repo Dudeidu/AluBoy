@@ -23,43 +23,43 @@ void input_update(u8* in)
 
 void input_tick()
 {
-    u8 select_direction = !GET_BIT(reg[REG_P1], 4);
-    u8 select_action    = !GET_BIT(reg[REG_P1], 5);
+    u8 p1 = reg[REG_P1];
 
-    u8 inputs_prev = reg[REG_P1];
+    u8 select_direction = !GET_BIT(p1, 4);
+    u8 select_action    = !GET_BIT(p1, 5);
 
     if (!select_direction && !select_action) {
-        reg[REG_P1] = 0xFF; // Set all bits to 1 if neither condition is met
+        p1 = 0xFF; // Set all bits to 1 if neither condition is met
     }
     else {
-        reg[REG_P1] = 0xF0; // Start with upper nibble set
+        p1 = 0xF0; // Start with upper nibble set
         //if (inputs_action != 15) printf("%d", inputs_action);
         //if (inputs_direction != 15) printf("%d", inputs_direction);
         if (select_direction && !select_action) {
-            RESET_BIT(reg[REG_P1], 4);
-            reg[REG_P1] |= (inputs_direction);
+            RESET_BIT(p1, 4);
+            p1 |= (inputs_direction);
         }
         else if (select_action && !select_direction) {
-            RESET_BIT(reg[REG_P1], 5);
-            reg[REG_P1] |= (inputs_action);
+            RESET_BIT(p1, 5);
+            p1 |= (inputs_action);
         }
         else {
-            RESET_BIT(reg[REG_P1], 4);
-            RESET_BIT(reg[REG_P1], 5);
-            reg[REG_P1] |= (inputs_direction & inputs_action);
+            RESET_BIT(p1, 4);
+            RESET_BIT(p1, 5);
+            p1 |= (inputs_direction & inputs_action);
         }
     }
-    
     // The Joypad interrupt is requested when any of P1 bits 0-3 change from High to Low
     // Indicating that a button was pressed
-    for (u8 i=0; i<=3; i++) { 
-        if (GET_BIT(inputs_prev, i) && !GET_BIT(reg[REG_P1], i)) {
+    if (reg[REG_P1] != p1) {
+        // Check for changes from high to low for bits 0-3
+        u8 change_mask = (reg[REG_P1] & 0x0F) & ~(p1 & 0x0F);
+        if (change_mask > 0) {
             // Joypad interrupt
             SET_BIT(reg[REG_IF], INT_BIT_JOYPAD);
-            //printf("%d,", reg[REG_P1]);
-            //printf("int request: joypad\n");
-            break;
         }
+
+        reg[REG_P1] = p1;
     }
 }
 
