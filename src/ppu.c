@@ -18,7 +18,14 @@ u8 redraw_flag;
 u16 scanline_counter; // every >SCANLINE_DOTS, update LY
 
 // Drawing optimization
-u16 tm_addr_prev        = 0;
+int vblank_counter  = 0;
+u8  frameskip       = 1; // only draw the screen when vblank_counter % frameskip == 0
+u16 tm_addr_prev    = 0;
+
+
+u8  pal_bgp[4]      = { 0, 1, 2, 3 };
+u8  pal_obp0[4]     = { 0, 1, 2, 3 };
+u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 
 // FORWARD DECLARE
 void draw_scanline(u8 y);
@@ -63,9 +70,23 @@ u8* ppu_get_pixel_buffer()
     return background_buffer;
 }
 
+// assigns gray shades to the color indexes
+void ppu_update_palette(u8 reg, u8 value) {
+    u8* palette;
+    switch (reg) {
+        case REG_BGP:   palette = pal_bgp; break;
+        case REG_OBP0:  palette = pal_obp0; break;
+        case REG_OBP1:  palette = pal_obp1; break;
+        default: return;
+    }
+    for (int i = 0; i < 4; i++) {
+        palette[i] = (value >> (i * 2)) & 0x3;
+    }
+}
+
 // Whether the screen needs to be redrawn
 u8 ppu_get_redraw_flag() {
-    return redraw_flag;
+    return redraw_flag && (vblank_counter % frameskip == 0);
 }
 void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
@@ -114,6 +135,8 @@ void ppu_tick(u8 cycles)
             if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
                 SET_BIT(reg[REG_IF], INT_BIT_STAT);
             }
+
+            vblank_counter++;
         }
         // HBlank
         else if (reg[REG_LY] < SCREEN_HEIGHT) {
@@ -127,7 +150,9 @@ void ppu_tick(u8 cycles)
             // HBLANK HDMA
 
             // DEBUG Draw entire line //////////////////////////////
-            draw_scanline(reg[REG_LY] == 0 ? (SCREEN_HEIGHT - 1) : (reg[REG_LY] - 1));
+            if (vblank_counter % frameskip == 0) {
+                draw_scanline(reg[REG_LY] == 0 ? (SCREEN_HEIGHT - 1) : (reg[REG_LY] - 1));
+            }
         }
         //printf("%d,", reg[REG_LY]);
     }
@@ -181,7 +206,10 @@ void draw_tiles(u8 y) {
     u8  td_area_flag    = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
     u16 vram_offset     = MEM_VRAM;
 
-    int tile_index_prev = -1;
+    // Drawing optimization
+   // int tile_index_prev = -1;
+   // u8  row_prev = 0;
+
     u8  window_in_line  = 0;
     u8  bg_in_line = 1;
 
@@ -217,7 +245,7 @@ void draw_tiles(u8 y) {
         win_row     = ((y - wy) & 0xFF) % 8;
 
         // Check if window covers the entire background
-        if (wx <= 7 && wy <= 0) {
+        if (wx <= 0 && wy <= 0) {
             bg_in_line = 0;
         }
     }
@@ -258,35 +286,28 @@ void draw_tiles(u8 y) {
             //bg_pixels++;
         }
 
-        // Only fetch new bytes when the tile index / tilemap address has changed
+        // Only fetch new bytes when the tilemap address has changed
         if (tm_addr_prev != tm_addr) {
             tm_addr_prev = tm_addr;
             if (td_area_flag) tile_index = vram[tm_addr - vram_offset];
             else tile_index = (s8)vram[tm_addr - vram_offset];
 
-            if (tile_index != tile_index_prev) {
-                tile_index_prev = tile_index;
-                // Get tile data (unsigned/signed addressing)
-                // (0-127 are in block 2, -128 to -1 are in block 1)
-                td_addr = (td_area_flag ? 0x8000 : 0x9000) + (tile_index * 16);
+            // Get tile data (unsigned/signed addressing)
+            // (0-127 are in block 2, -128 to -1 are in block 1)
+            td_addr = (td_area_flag ? 0x8000 : 0x9000) + (tile_index * 16);
 
-                // Get pixel info
-                pixel_offset = td_addr + (row * 2) - vram_offset;
-                byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
-                byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
-                
-                //tile_index_changes++;
-            }
-
-            //tm_addr_changes++;
+            // Get pixel info
+            pixel_offset = td_addr + (row * 2) - vram_offset;
+            byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
+            byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
         }
         // get color of pixel using the 2BPP method
         color_index = (GET_BIT(byte2, 7 - col) << 1) | GET_BIT(byte1, 7 - col);
 
         // Update pixel color
         pixel_pos = x + y_screen_width;
-        if (background_buffer[pixel_pos] != color_index) {
-            background_buffer[pixel_pos] = color_index;
+        if (background_buffer[pixel_pos] != pal_bgp[color_index]) {
+            background_buffer[pixel_pos] = pal_bgp[color_index];
             // Tell screen to redraw at the next step
             if (!redraw_flag) redraw_flag = 1;
 
@@ -304,38 +325,52 @@ void draw_tiles(u8 y) {
 }
 
 void draw_sprites(u8 y) {
+    u16 y_screen_width = y * SCREEN_WIDTH;
+    u8 sprite_count = 0;
+
     u8 lcdc = reg[REG_LCDC];
-    u8 is_big = GET_BIT(lcdc, LCDC_OBJ_SZ); // 8x16 sprites
-    u8 height = is_big ? 16 : 8;
+    u8 spr_height = GET_BIT(lcdc, LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
 
     // iterate through all sprites, draw if pixel intercects with our scanline
-    for (u8 spr = 0; spr < 40; spr++) {
+    for (s8 spr = 39; spr >= 0; spr--) {
         u8 index        = spr << 2; // spr * 4
         u8 ypos         = oam[index    ];
         u8 xpos         = oam[index + 1];
         u8 tile_index   = oam[index + 2];
         u8 attr         = oam[index + 3];
-        u8 flip_x, flip_y;
-
+        u8 palette_no, flip_x, flip_y, bg_over_obj;
         u8 pixel_updated = 0;
 
         u8 byte1, byte2;
         u8 color_index;
         u16 pixel_offset;
-        short ty = (y - (ypos - 16)); // the sprite line to draw
+        u16 pixel_pos;
+        short ty; // the sprite line to draw
+
+        u8* palette;
+
+        // check if reached sprite limit per scanline
+        if (sprite_count == 10) return;
 
         // check if outside screen
-        if (ypos == 0 || ypos >= 160) { continue; }
-        if (xpos == 0 || xpos >= 168) { continue; }
-
+        if ((ypos + spr_height) <= 16 || ypos >= 160) { continue; }
         // check if intersecting
-        if (ty < 0 || ty >= height) continue;
+        ty = (y - (ypos - 16));
+        if (ty < 0 || ty >= spr_height) continue;
 
-        flip_x = GET_BIT(attr, OAM_X_FLIP);
-        flip_y = GET_BIT(attr, OAM_Y_FLIP);
+        // count towards scanline limit (PPU only checks the Y coordinate to select objects)
+        sprite_count++;
 
-        if (flip_y) ty = height - ty;
+        if (xpos == 0 || xpos >= 168) { continue; }
         
+        flip_y      = GET_BIT(attr, OAM_Y_FLIP);
+        if (flip_y) ty = spr_height - ty;
+
+        palette_no  = GET_BIT(attr, OAM_PALLETE_DMG);
+        flip_x      = GET_BIT(attr, OAM_X_FLIP);
+        bg_over_obj = GET_BIT(attr, OAM_BG_OVER_OBJ);
+        palette = palette_no == 0 ? pal_obp0 : pal_obp1;
+
         // get pixel info
         pixel_offset = (tile_index * 16) + (ty * 2); // each tile takes 16 bytes (8x8x2BPP), each row of pixels is 2 bytes (2BPP)
         byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
@@ -343,14 +378,25 @@ void draw_sprites(u8 y) {
 
         for (s8 x = 7; x >= 0; x--) {
             u8 px = (xpos - 8) + (flip_x ? x : (7 - x)); // Horizontal flip
+            
             if (px >= SCREEN_WIDTH || px < 0) continue; // boundary check
 
             color_index = (GET_BIT(byte2, x) << 1) | GET_BIT(byte1, x);
-            if (color_index == 0) continue; // white is transparent for sprites
-            pixel_updated = set_pixel(px + (y * SCREEN_WIDTH), color_index);
-            
-            // tell screen to redraw at the next step
-            if (!redraw_flag && pixel_updated) redraw_flag = 1;
+
+            // Transparent pixel
+            if (color_index == 0) continue;
+
+            // Update pixel color
+            pixel_pos = px + y_screen_width;
+
+            // BG and Window colors 1-3 over the OBJ
+            if (bg_over_obj && background_buffer[pixel_pos] != 0) continue;
+
+            if (background_buffer[pixel_pos] != palette[color_index]) {
+                background_buffer[pixel_pos] = palette[color_index];
+                // Tell screen to redraw at the next step
+                if (!redraw_flag) redraw_flag = 1;
+            }
         }
 
     }

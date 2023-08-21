@@ -183,7 +183,7 @@ void application_update() {
 
         // Stalls the program when its running too fast
         if (tick_rate > delta) {
-            SDL_Delay(tick_rate - delta);
+            SDL_Delay((u32)(tick_rate - delta));
         }
         // Alternative: More accurate, but cpu works harder since it never sleeps
         //if (tick_rate > delta) continue; 

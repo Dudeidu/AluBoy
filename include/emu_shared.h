@@ -219,5 +219,6 @@ extern void input_tick();
 extern void input_joypad_update();
 
 extern void ppu_tick(u8 cycles);
+extern void ppu_update_palette(u8 reg, u8 value);
 
 #endif EMU_SHARED_H

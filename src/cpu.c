@@ -857,7 +857,15 @@ int write(u16 addr, u8 value)
                             reg[REG_DMA] = value;
                             dma_transfer_flag = 1;
                             break;
-
+                        case REG_BGP:
+                            ppu_update_palette(REG_BGP, value);
+                            break;
+                        case REG_OBP0:
+                            ppu_update_palette(REG_OBP0, value);
+                            break;
+                        case REG_OBP1:
+                            ppu_update_palette(REG_OBP1, value);
+                            break;
                         default:
                             reg[addr & 0xFF] = value;   // Convert to range 0-255
                             break;
