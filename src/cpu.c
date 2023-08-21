@@ -55,7 +55,6 @@ u8 boot_rom[] = {
 u8  reg[0x100];     // Refers to Register enum
 u8  vram[2 * BANKSIZE_VRAM];
 u8  oam[0xA0];
-u8  cpu_mode;       // vblank/hblank/oam search/pixel rendering...
 u8  interrupts_enabled; // IME flag
 
 // Hardware registers
@@ -530,6 +529,8 @@ u8 read(u16 addr)
         case 0x8:
         case 0x9:
             // VRAM
+            //if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+
             if (cgb_flag)   return vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)];
             else            return vram[addr - MEM_VRAM];
             break;
@@ -563,15 +564,20 @@ u8 read(u16 addr)
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
+                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
+
                 return oam[addr - MEM_OAM]; // Convert to range 0-159
             }
             // I/O Registers
             else if (addr >= MEM_IO && addr < MEM_HRAM) {
                 switch (addr & 0xFF) {
-                    case REG_SB:
-                        return 0xFF;
                     case REG_P1:
                         return reg[REG_P1];
+                    case REG_SB:
+                        return 0xFF;
+                    case REG_OBPD:
+                        if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+                        return reg[REG_OBPD];
                     default:
                         return reg[addr - MEM_IO];   // Convert to range 0-255
                 }
@@ -767,6 +773,8 @@ int write(u16 addr, u8 value)
             case 0x8:
             case 0x9:
                 // VRAM
+                //if (lcd_mode == LCD_MODE_VRAM) return -1;
+
                 if (cgb_flag)   vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
                 else            vram[addr - MEM_VRAM] = value;
                 break;
@@ -803,6 +811,8 @@ int write(u16 addr, u8 value)
                 }
                 // Object attribute memory (OAM)
                 else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
+                    //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return -1;
+
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
                 }
                 // I/O Registers
@@ -848,6 +858,21 @@ int write(u16 addr, u8 value)
                             */
                             reg[REG_IF] = value;
                             break;
+                        case REG_LCDC:
+                            //if (reg[REG_LY] >= SCREEN_WIDTH) 
+                            if (lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
+                                printf("illegal LCD disable\n");
+                            }
+                            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
+                            {
+                                ppu_clear_screen();
+                                lcd_enabled = 0;
+                            }
+                            else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
+                                lcd_enabled = 1;
+                            }
+                            reg[REG_LCDC] = value;
+                            break;
                         case REG_LY: 
                             break; // read only
                         case REG_DMA:
@@ -857,6 +882,7 @@ int write(u16 addr, u8 value)
                             reg[REG_DMA] = value;
                             dma_transfer_flag = 1;
                             break;
+                        
                         case REG_BGP:
                             ppu_update_palette(REG_BGP, value);
                             break;
@@ -865,6 +891,10 @@ int write(u16 addr, u8 value)
                             break;
                         case REG_OBP1:
                             ppu_update_palette(REG_OBP1, value);
+                            break;
+                        case REG_OBPD:
+                            if (lcd_mode == LCD_MODE_VRAM) return -1;
+                            reg[REG_OBPD] = value;
                             break;
                         default:
                             reg[addr & 0xFF] = value;   // Convert to range 0-255
@@ -1750,7 +1780,9 @@ void tick() {
     u8 cycles = 4 >> double_speed;
     input_tick();
     update_timers(cycles);
-    ppu_tick(double_speed ? (cycles >> 1) : cycles);
+    //if (lcd_enabled) {
+        ppu_tick(double_speed ? (cycles >> 1) : cycles);
+    //}
 }
 
 u8 execute_instruction(u8 op) {
@@ -2934,11 +2966,11 @@ void cpu_update()
     {
         u8 show_logs = 0;
         if (show_logs) {
-            //if (counter > 0 && counter < 4000)
+            if (counter % 100 == 0)
             {
-                printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X\n",
+                printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d\n",
                     counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1]);
+                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted);
                 /*
                 printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
                     counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,

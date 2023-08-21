@@ -209,8 +209,10 @@ extern u8   reg[0x100];     // Refers to Register enum
 extern u8   vram[2 * BANKSIZE_VRAM];
 extern u8   oam[0xA0];
 
-extern u8   cpu_mode;       // vblank/hblank/oam search/pixel rendering...
 extern u8   interrupts_enabled; // IME flag
+
+extern u8   lcd_mode;       // vblank/hblank/oam search/pixel rendering...
+extern u8   lcd_enabled;
 
 extern u8   input_updated;   // whether the inputs were already fetched this frame
 
@@ -220,5 +222,6 @@ extern void input_joypad_update();
 
 extern void ppu_tick(u8 cycles);
 extern void ppu_update_palette(u8 reg, u8 value);
+extern void ppu_clear_screen();
 
 #endif EMU_SHARED_H

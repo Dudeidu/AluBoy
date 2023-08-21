@@ -16,6 +16,10 @@ u8* window_buffer      = NULL;
 u8 redraw_flag;
 
 u16 scanline_counter; // every >SCANLINE_DOTS, update LY
+u16 lcd_mode_next;    // determines when (scanline_counter) to switch lcd_mode
+u16 objects[40];      // array of object indexes that intersect with of the current scanline
+u8  object_count;     // how many objects to read from the array
+
 
 // Drawing optimization
 int vblank_counter  = 0;
@@ -27,10 +31,15 @@ u8  pal_bgp[4]      = { 0, 1, 2, 3 };
 u8  pal_obp0[4]     = { 0, 1, 2, 3 };
 u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 
+// Shared
+u8 lcd_mode = LCD_MODE_VBLANK;
+u8 lcd_enabled      = 1;
+
 // FORWARD DECLARE
 void draw_scanline(u8 y);
 void draw_tiles(u8 y);
 void draw_sprites(u8 y);
+u8 search_oam(u8 y);
 
 // PUBLIC --------------------------------------------------
 
@@ -84,10 +93,22 @@ void ppu_update_palette(u8 reg, u8 value) {
     }
 }
 
+void ppu_clear_screen() {
+    int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
+
+    reg[REG_LY] = 0;
+    vblank_counter = 0;
+    scanline_counter = 0;
+    RESET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+
+    memset(background_buffer, MEM_ROM_0, buffer_size);
+}
+
 // Whether the screen needs to be redrawn
 u8 ppu_get_redraw_flag() {
     return redraw_flag && (vblank_counter % frameskip == 0);
 }
+
 void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
 }
@@ -95,75 +116,105 @@ void ppu_set_redraw_flag(u8 val) {
 void ppu_tick(u8 cycles)
 {
     u8 clock = cycles;
+    u8 new_frame = 0;
 
     //printf("%d,", reg[REG_STAT]);
     scanline_counter += clock;
-    // Reached end of scanline
-    if (scanline_counter > SCANLINE_DOTS) {
-        scanline_counter -= SCANLINE_DOTS;
-
-        // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
-        reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
-        if (reg[REG_LYC] && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
-        {
-            // request interrupt
-            SET_BIT(reg[REG_IF], INT_BIT_STAT);
-        }
-        // Move to a new scanline
-        reg[REG_LY] ++;
-        if (reg[REG_LY] >= 0x9A) {
-            reg[REG_LY] = 0;
-
-            input_updated = 0;
-        }
-
-        // Update inputs at a different LY each frame to avoid detection
-        if (!input_updated) {
-            input_joypad_update();
-        }
-
-        // VBlank
-        if (reg[REG_LY] == SCREEN_HEIGHT) {
-            //printf("VBlank start...\n");
-            // change lcd mode to vblank
-            //SET_BIT(reg[REG_STAT], LCD_MODE_VBLANK);
-
-            // Vblank interrupt request
-            SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
-
-            // request interrupt if enabled
-            if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
+    if (scanline_counter < lcd_mode_next) return;
+    switch (lcd_mode) {
+        case LCD_MODE_OAM: // Searching OAM for OBJs whose Y coordinate overlap this line
+            reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VRAM;
+            lcd_mode = LCD_MODE_VRAM;
+            lcd_mode_next += 172;
+            break;
+        case LCD_MODE_VRAM: // Reading OAM and VRAM to generate the picture
+            // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
+            reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
+            if (reg[REG_LYC] && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
+            {
+                // request interrupt
                 SET_BIT(reg[REG_IF], INT_BIT_STAT);
             }
 
-            vblank_counter++;
-        }
-        // HBlank
-        else if (reg[REG_LY] < SCREEN_HEIGHT) {
-            // change lcd mode to hblank
-            //SET_BIT(reg[REG_STAT], LCD_MODE_HBLANK);
-            // request interrupt if enabled
+            // request hblank interrupt if enabled
             if (GET_BIT(reg[REG_STAT], STAT_INT_HBLANK)) {
                 SET_BIT(reg[REG_IF], INT_BIT_STAT);
             }
 
-            // HBLANK HDMA
+            reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
+            lcd_mode = LCD_MODE_HBLANK;
+            lcd_mode_next = SCANLINE_DOTS;
+            break;
+        case LCD_MODE_HBLANK:
+            scanline_counter -= SCANLINE_DOTS;
 
-            // DEBUG Draw entire line //////////////////////////////
-            if (vblank_counter % frameskip == 0) {
-                draw_scanline(reg[REG_LY] == 0 ? (SCREEN_HEIGHT - 1) : (reg[REG_LY] - 1));
+            // Draw scanline //////////////////////////////
+            object_count = search_oam(reg[REG_LY]);
+            if (lcd_enabled && vblank_counter % frameskip == 0) {
+                draw_scanline(reg[REG_LY]);
             }
-        }
-        //printf("%d,", reg[REG_LY]);
-    }
-    // OAM access
 
-    //
-    else {
-        // get pixel coordinate
+            // Move to a new scanline
+            reg[REG_LY] ++;
 
+            // Update inputs at a different LY each frame to avoid detection
+            if (!input_updated) {
+                input_joypad_update();
+            }
+
+            if (reg[REG_LY] == SCREEN_HEIGHT) {
+                // Vblank period start
+                vblank_counter++;
+
+                // Vblank interrupt request
+                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
+
+                // request interrupt if enabled
+                if (GET_BIT(reg[REG_STAT], STAT_INT_VBLANK)) {
+                    SET_BIT(reg[REG_IF], INT_BIT_STAT);
+                }
+
+                lcd_mode = LCD_MODE_VBLANK;
+                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VBLANK;
+                lcd_mode_next = SCANLINE_DOTS;
+            }
+            else {
+                // request interrupt if enabled
+                if (GET_BIT(reg[REG_STAT], STAT_INT_OAM)) {
+                    SET_BIT(reg[REG_IF], INT_BIT_STAT);
+                }
+                // change lcd mode to oam search (0~80)
+                lcd_mode = LCD_MODE_OAM;
+                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
+                lcd_mode_next = 80;
+            }
+            break;
+        case LCD_MODE_VBLANK:
+            scanline_counter -= SCANLINE_DOTS;
+
+            // Move to a new scanline
+            reg[REG_LY] ++;
+            
+            // Reached last line
+            if (reg[REG_LY] >= 0x9A) {
+                reg[REG_LY] = 0;
+                // reset input fetching
+                input_updated = 0;
+
+                if (!input_updated) {
+                    input_joypad_update();
+                }
+                // request interrupt if enabled
+                if (GET_BIT(reg[REG_STAT], STAT_INT_OAM)) {
+                    SET_BIT(reg[REG_IF], INT_BIT_STAT);
+                }
+                // change lcd mode to oam search (0~80)
+                lcd_mode = LCD_MODE_OAM;
+                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
+                lcd_mode_next = 80;
+            }
+            break;
     }
-    // ...
 }
 
 void ppu_cleanup()
@@ -183,6 +234,33 @@ u8 set_pixel(u16 pos, u8 color_index)
     background_buffer[pos] = color_index;
 
     return (color_index_prev != color_index);
+}
+
+// Searching OAM for OBJs whose Y coordinate overlap this scanline, and return the amount.
+u8 search_oam(u8 y) {
+    u8 count = 0;
+    u8 obj_height = GET_BIT(reg[REG_LCDC], LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
+
+    // iterate through all objects in OAM, count if pixel intersects with our scanline
+    for (s8 obj = 0; obj < 40; obj++) {
+        u8 index = obj << 2; // obj * 4
+        u8 ypos = oam[index];
+        short ty; // the sprite line to draw
+
+        // check if outside screen
+        if ((ypos + obj_height) <= 16 || ypos >= 160) {
+            continue;
+        }
+        // check if intersecting
+        ty = (y - (ypos - 16));
+        if (ty < 0 || ty >= obj_height) continue;
+
+        // add to array of intersecting object indexes
+        objects[count++] = index;
+        // count towards scanline limit (PPU only checks the Y coordinate to select objects)
+        if (count == 10) return count;
+    }
+    return count;
 }
 
 void draw_scanline(u8 y) {
@@ -325,15 +403,16 @@ void draw_tiles(u8 y) {
 }
 
 void draw_sprites(u8 y) {
+    if (object_count == 0) return;
+
     u16 y_screen_width = y * SCREEN_WIDTH;
-    u8 sprite_count = 0;
 
     u8 lcdc = reg[REG_LCDC];
-    u8 spr_height = GET_BIT(lcdc, LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
+    u8 obj_height = GET_BIT(lcdc, LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
 
     // iterate through all sprites, draw if pixel intercects with our scanline
-    for (s8 spr = 39; spr >= 0; spr--) {
-        u8 index        = spr << 2; // spr * 4
+    for (s8 obj = object_count-1; obj >= 0; obj--) {
+        u16 index       = objects[obj]; // spr * 4
         u8 ypos         = oam[index    ];
         u8 xpos         = oam[index + 1];
         u8 tile_index   = oam[index + 2];
@@ -349,22 +428,12 @@ void draw_sprites(u8 y) {
 
         u8* palette;
 
-        // check if reached sprite limit per scanline
-        if (sprite_count == 10) return;
-
         // check if outside screen
-        if ((ypos + spr_height) <= 16 || ypos >= 160) { continue; }
-        // check if intersecting
-        ty = (y - (ypos - 16));
-        if (ty < 0 || ty >= spr_height) continue;
-
-        // count towards scanline limit (PPU only checks the Y coordinate to select objects)
-        sprite_count++;
-
         if (xpos == 0 || xpos >= 168) { continue; }
         
-        flip_y      = GET_BIT(attr, OAM_Y_FLIP);
-        if (flip_y) ty = spr_height - ty;
+        ty = (y - (ypos - 16));
+        flip_y = GET_BIT(attr, OAM_Y_FLIP);
+        if (flip_y) ty = obj_height - ty;
 
         palette_no  = GET_BIT(attr, OAM_PALLETE_DMG);
         flip_x      = GET_BIT(attr, OAM_X_FLIP);
@@ -401,47 +470,3 @@ void draw_sprites(u8 y) {
 
     }
 }
-
-
-/*
-/// <summary>
-/// Draws an 8x8 pixels tile to a buffer
-/// </summary>
-/// <param name="x">screen coordinate</param>
-/// <param name="y">screen coordinate</param>
-/// <param name="tile_data">pointer to the tile data</param>
-void ppu_draw_tile(int x, int y, u8* tile_data, BufferType buffer_type)
-{
-    // Ensure the provided x and y coordinates are within bounds.
-    // Add error handling as needed.
-    
-    // Get the target buffer
-    uint8_t* buffer = NULL;
-    switch (buffer_type)
-    {
-        case SPRITE_BUFFER:     buffer = sprite_buffer; break;
-        case BACKGROUND_BUFFER: buffer = background_buffer; break;
-        case WINDOW_BUFFER:     buffer = window_buffer; break;
-        default:
-            // Handle unknown buffer_type value or print an error message
-            fprintf(stderr, "Unknown buffer_type: %d\n", buffer_type);
-            return;  // Or handle appropriately
-    }
-    // Tiles are 16 bytes long, each line is represented by 2 bytes.
-    for (u8 r = 0; r < 8; r++) // Iterate through each line
-    {
-        u8 byte1 = tile_data[r * 2];      // represents lsb of the color_index of each pixel
-        u8 byte2 = tile_data[r * 2 + 1];  // represents msb of the color_index of each pixel
-
-        // The color index of pixel c in line r
-        for (u8 c = 0; c < 8; c++)
-        {
-            u8 color_index = (GET_BIT(byte2, 7 - c) << 1) | GET_BIT(byte1, 7 - c);
-            // 0 = transparent in objects (not drawn)
-            if (color_index == 0 && buffer_type == SPRITE_BUFFER) continue;
-
-            //buffer[(y + r) * SCREEN_WIDTH + x + c] = color_index;
-        }
-    }
-}
-*/
