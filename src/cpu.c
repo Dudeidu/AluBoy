@@ -453,6 +453,7 @@ int cpu_init(u8* rom_buffer)
         case 0x5:   rom_banks = 64;  break; // 1   MB
         case 0x6:   rom_banks = 128; break; // 2   MB
         case 0x7:   rom_banks = 256; break; // 4   MB
+        case 0x8:   rom_banks = 512; break; // 8   MB
         case 0x52:  rom_banks = 72;  break; // 1.1 MB
         case 0x53:  rom_banks = 80;  break; // 1.2 MB
         case 0x54:  rom_banks = 96;  break; // 1.5 MB
@@ -473,7 +474,13 @@ int cpu_init(u8* rom_buffer)
         eram = (u8*)malloc(sizeof(u8) * eram_banks * BANKSIZE_ERAM);
     }
     else {
-        eram = NULL;
+        // MBC2 has built in ram (512x4 bits)
+        if (mbc == 2) {
+            eram = (u8*)malloc(512);
+        }
+        else {
+            eram = NULL;
+        }
     }
 
     // Licensee code
@@ -524,11 +531,6 @@ u8 read(u16 addr)
         case 0x5:
         case 0x6:
         case 0x7:
-            // ROM bank > 0
-            //if (rom_bank >= rom_banks) return 0xFF;
-            if (rom_bank > 0x1F){
-                u8 i = 0;
-            }
             return rom[(addr - MEM_ROM_N) + (rom_bank * BANKSIZE_ROM)];
         case 0x8:
         case 0x9:
@@ -544,8 +546,7 @@ u8 read(u16 addr)
             if (!eram_enabled) return 0xFF;
             if (mbc == 2) {
                 // Half bytes, Bottom 9 bits of address are used to index RAM
-                if (eram_bank >= eram_banks) return 0xFF;
-                return eram[addr & 0x1FF];
+                return (eram[addr & 0x1FF] | 0xF0); // reads first nibble, second nibble is all set
             }
             else if (mbc == 3 && rtc_select_reg > 0) {
                 // RTC register read
@@ -674,12 +675,16 @@ int write(u16 addr, u8 value)
                     case 0x3:
                     {
                         // RAM enable  / ROM bank number
-                        if (((addr >> 8) & 1) == 0) {
-                            eram_enabled = (value == 0xA);
+                        if ((addr & 0x100) == 0) { // bit 8 is 0
+                            eram_enabled = ((value & 0xF) == 0xA);
                         }
                         else {
+                            //printf("rom bank value: %d,", value);
                             rom_bank = (value & 0xF);
                             if (rom_bank == 0) rom_bank = 1;
+
+                            rom_bank = rom_bank & (rom_banks - 1);
+                            //printf("new value: %d\n", rom_bank);
                         }
                     } break;
                 }
@@ -751,23 +756,22 @@ int write(u16 addr, u8 value)
                     case 0x2:
                     {
                         // 8 bit register - ROM bank number
-                        if (value < rom_banks) {
-                            rom_bank = value;
-                        }
-                        else {
-                            // Mask the number to the max banks
-                            rom_bank = (value % rom_banks);
-                        }
-                        // On larger carts which need a >8 bit bank number, 
-                        // the secondary banking register is used to supply an additional 1 bits for the effective bank number
-                        if (rom_banks > 0xFF) {
-                            rom_bank = (rom_bank + (rom_bank_2 << 8));
-                        }
+                        // Mask the number to the max banks
+                        printf("bank change value: %02X,", value);
+                        rom_bank = (rom_bank & 0xFF00) | value;
+                        rom_bank = rom_bank & (rom_banks - 1);
+                        printf("new rom bank: %02X\n", rom_bank);
                     } break;
                     case 0x3:
                     {
-                        // 9th bit of ROM bank number
+                        printf("bank2 change value: %02X,", value & 1);
+                        // bit 8 of ROM bank number
                         rom_bank_2 = (value & 1);
+                        rom_bank = (rom_bank & 0xFF) | (rom_bank_2 << 8);
+                        // Mask the number to the max banks
+                        rom_bank = (rom_bank & (rom_banks-1));
+
+                        printf("new rom bank: %02X\n", rom_bank);
                     } break;
                     case 0x4:
                     case 0x5:
@@ -795,7 +799,6 @@ int write(u16 addr, u8 value)
                 if (!eram_enabled) return -1;
                 if (mbc == 2) {
                     // Half bytes, Bottom 9 bits of address are used to index RAM
-                    if (eram_bank >= eram_banks) return 0xFF;
                     eram[addr & 0x1FF] = (value & 0xF);
                 }
                 else if (mbc == 3 && rtc_select_reg > 0) {

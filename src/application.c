@@ -129,7 +129,7 @@ int application_init(const char* title) {
 
     // Open rom
     //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/tests/mooneye-test-suite/emulator-only/mbc2/rom_1Mb.gb");
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/dr. mario.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
