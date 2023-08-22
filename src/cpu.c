@@ -514,7 +514,7 @@ u8 read(u16 addr)
         case 0x3:
             // In MBC1 mode-1: ROM bank X0
             if (mbc == 1 && mbc_mode == 1) {
-                return rom[rom_bank_2 << 5];
+                return rom[addr + ((rom_bank_2 << 5) % rom_banks) * BANKSIZE_ROM];
             }
             // ROM bank 0
             else {
@@ -525,7 +525,11 @@ u8 read(u16 addr)
         case 0x6:
         case 0x7:
             // ROM bank > 0
-            return rom[(addr & 0x3FFF) + (rom_bank * BANKSIZE_ROM)];
+            //if (rom_bank >= rom_banks) return 0xFF;
+            if (rom_bank > 0x1F){
+                u8 i = 0;
+            }
+            return rom[(addr - MEM_ROM_N) + (rom_bank * BANKSIZE_ROM)];
         case 0x8:
         case 0x9:
             // VRAM
@@ -614,31 +618,32 @@ int write(u16 addr, u8 value)
                     {
                         // 5 bit register - ROM bank number
                         u8 rb = (value & 0x1F);
+                        if (rb == 0) rb = 1;
+                        //printf("bank change value: %02X,", rb);
                         if (rb < rom_banks) {
-                            rom_bank = (rb == 0) ? 1 : rb; // 0 behaves as 1
+                            rom_bank = (rom_bank & ~0x1F) | rb; // only change the lower 5 bits
                         }
                         else {
                             // Mask the number to the max banks
-                            rom_bank = (rb % rom_banks);
+                            rom_bank = (rom_bank & ~0x1F) | (rb & (rom_banks-1));
+
                         }
-                        // On larger carts which need a >5 bit bank number, 
-                        // the secondary banking register is used to supply an additional 2 bits for the effective bank number
-                        if (rom_banks > 0x1F) {
-                            rom_bank = rom_bank + (rom_bank_2 << 5);
-                            if ((rom_bank & 0xE0) == 0x00) {
-                                // The lower 5 bits of the value are all zero (0x00, 0x20, 0x40, or 0x60))
-                                rom_bank += 1;
-                            }
-                            // MMM01 (multi-cart) has a different formula
-                            // These additional two bits are ignored for the bank 00 -> 01 translation
-                        }
+                        //printf("new rom bank: %02X\n", rom_bank);
                     } break;
                     case 0x4:
                     case 0x5:
                     {
                         // 2 bit register - RAM bank number / Upper bits of ROM bank number
-                        if (eram_banks >= 4)        eram_bank = (value & 0x3);
-                        else if (rom_banks >= 64)   rom_bank_2 = (value & 0x3);
+                        rom_bank_2 = (value & 0x3);
+                        rom_bank = (rom_bank & 0x1F) | (rom_bank_2 << 5);
+
+                        // Mask the number to the max banks
+                            rom_bank = (rom_bank & (rom_banks-1));
+
+                        if (mbc_mode == 1) {
+                            eram_bank = (value & 0x3);
+                        }
+                        
                         // In MMM01 this 2-bit register is instead applied to bits 4-5 
                         // of the ROM bank number and the top bit of the main 5-bit main ROM banking register is ignored
                     } break;
@@ -648,9 +653,15 @@ int write(u16 addr, u8 value)
                         // 1 bit register - Banking mode select
                         // 00 = Simple Banking Mode (default) 
                         // 01 = RAM Banking Mode / Advanced ROM Banking Mode
-                        if ((eram_size_code >= 2) && (rom_banks >= 32)) {
-                            mbc_mode = (value & 1);
+                        mbc_mode = (value & 1);
+                        if (mbc_mode == 0) {
+                            //eram_bank = 0;
+                            rom_bank = rom_bank & 0x1F; // remove rom_bank_2
                         }
+                        else {
+                            u8 i = 0;
+                        }
+
                     } break;
                 }
             } break;
