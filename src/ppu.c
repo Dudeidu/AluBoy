@@ -129,8 +129,10 @@ void ppu_tick(u8 cycles)
             break;
         case LCD_MODE_VRAM: // Reading OAM and VRAM to generate the picture
             // Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
-            reg[REG_LYC] = (reg[REG_LY] == reg[REG_LYC]);
-            if (reg[REG_LYC] && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
+            if (reg[REG_LY] == reg[REG_LYC]) SET_BIT(reg[REG_STAT], 2);
+            else RESET_BIT(reg[REG_STAT], 2);
+
+            if (GET_BIT(reg[REG_STAT], 2) && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
             {
                 // request interrupt
                 SET_BIT(reg[REG_IF], INT_BIT_STAT);
@@ -266,6 +268,11 @@ u8 search_oam(u8 y) {
 void draw_scanline(u8 y) {
     if (GET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE)) {
         draw_tiles(y);
+    }
+    else {
+        // draw white color
+        //memset(&background_buffer[y * SCREEN_WIDTH], 0, SCREEN_WIDTH);
+        //redraw_flag = 1;
     }
     if (GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE)) {
         draw_sprites(y);
