@@ -12,6 +12,13 @@
 #include "emu_shared.h"
 #include "macros.h"
 
+// external functions
+extern void input_tick();
+
+extern void ppu_tick(u8 cycles);
+extern void ppu_update_palette(u8 reg, u8 value);
+extern void ppu_clear_screen();
+
 // Determines how many CPU cycles each instruction takes to perform
 u8 op_cycles_lut[]  = {
      4,12, 8, 8, 4, 4, 8, 4,20, 8, 8, 8, 4, 4, 8, 4,
@@ -77,6 +84,8 @@ u8  rtc[0xD];       // Refers to RTCRegister enum
 u8  hram[0x80];
 u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
 u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
+
+u8 has_battery;     // whether to import/export the external ram to a file (.sav)
 
 // Hardware timers
 u8  double_speed;
@@ -372,6 +381,7 @@ int power_up()
 
     reg[REG_LCDC] = 0x91;
     reg[REG_STAT] = 0x85;
+
     reg[REG_SCY] = 0x00;
     reg[REG_SCX] = 0x00;
     reg[REG_LY] = 0x00;
@@ -438,8 +448,20 @@ int cpu_init(u8* rom_buffer)
 
     // Cart type
     cart_type = rom[ROM_CART_TYPE];
+    
+    switch (cart_type) {
+        case 0x03: case 0x06: case 0x09: case 0x0D: case 0x0F: 
+        case 0x10: case 0x13: case 0x1B: case 0x1E: case 0x22: case 0xFF:
+            has_battery = 1;
+            break;
+        default:
+            has_battery = 0;
+            break;
+    }
+
     // MBC type
     mbc = (cart_type < mbc_lut_size) ? mbc = mbc_lut[cart_type] : 0;
+
     // ROM/ERAM banks
     rom_size_code = rom[ROM_ROM_SIZE];
     eram_size_code = rom[ROM_RAM_SIZE];
@@ -472,6 +494,10 @@ int cpu_init(u8* rom_buffer)
     if (eram != NULL) free(eram);
     if (eram_banks > 0) {
         eram = (u8*)malloc(sizeof(u8) * eram_banks * BANKSIZE_ERAM);
+        // load save file if exists
+        if (has_battery) {
+            //load_save();
+        }
     }
     else {
         // MBC2 has built in ram (512x4 bits)
@@ -535,7 +561,7 @@ u8 read(u16 addr)
         case 0x8:
         case 0x9:
             // VRAM
-            //if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+            if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
 
             if (cgb_flag)   return vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)];
             else            return vram[addr - MEM_VRAM];
@@ -569,7 +595,7 @@ u8 read(u16 addr)
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
+                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
 
                 return oam[addr - MEM_OAM]; // Convert to range 0-159
             }
@@ -757,21 +783,16 @@ int write(u16 addr, u8 value)
                     {
                         // 8 bit register - ROM bank number
                         // Mask the number to the max banks
-                        printf("bank change value: %02X,", value);
                         rom_bank = (rom_bank & 0xFF00) | value;
                         rom_bank = rom_bank & (rom_banks - 1);
-                        printf("new rom bank: %02X\n", rom_bank);
                     } break;
                     case 0x3:
                     {
-                        printf("bank2 change value: %02X,", value & 1);
                         // bit 8 of ROM bank number
                         rom_bank_2 = (value & 1);
                         rom_bank = (rom_bank & 0xFF) | (rom_bank_2 << 8);
                         // Mask the number to the max banks
                         rom_bank = (rom_bank & (rom_banks-1));
-
-                        printf("new rom bank: %02X\n", rom_bank);
                     } break;
                     case 0x4:
                     case 0x5:
@@ -788,7 +809,7 @@ int write(u16 addr, u8 value)
             case 0x8:
             case 0x9:
                 // VRAM
-                //if (lcd_mode == LCD_MODE_VRAM) return -1;
+                if (lcd_mode == LCD_MODE_VRAM) return -1;
 
                 if (cgb_flag)   vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
                 else            vram[addr - MEM_VRAM] = value;
@@ -825,7 +846,7 @@ int write(u16 addr, u8 value)
                 }
                 // Object attribute memory (OAM)
                 else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                    //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return -1;
+                    if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return -1;
 
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
                 }
@@ -873,8 +894,7 @@ int write(u16 addr, u8 value)
                             reg[REG_IF] = value;
                             break;
                         case REG_LCDC:
-                            //if (reg[REG_LY] >= SCREEN_WIDTH) 
-                            if (lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
+                            if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
                                 printf("illegal LCD disable\n");
                             }
                             if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
@@ -883,11 +903,22 @@ int write(u16 addr, u8 value)
                                 lcd_enabled = 0;
                             }
                             else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
+                                printf("lcd enabled\n");
                                 lcd_enabled = 1;
                             }
                             reg[REG_LCDC] = value;
                             break;
+                        case REG_STAT:
+                            // STAT irq blocking / bug
+                            // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
+                            // call your STAT IRQ poll function, then set STAT enable flags to their true values.
+                            stat_bug = 1;
+                            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
+                            // so it does not block if Mode 0 is enabled as well.
+                            reg[REG_STAT] = value;
+                            break;
                         case REG_LY: 
+                            if (lcd_enabled) reg[REG_LY] = 0;
                             break; // read only
                         case REG_DMA:
                             // DMA transfer - value specifies the transfer source address divided by $100
@@ -1794,9 +1825,9 @@ void tick() {
     u8 cycles = 4 >> double_speed;
     input_tick();
     update_timers(cycles);
-    //if (lcd_enabled) {
-        ppu_tick(double_speed ? (cycles >> 1) : cycles);
-    //}
+    ppu_tick(double_speed ? (cycles >> 1) : cycles);
+    
+    if (stat_bug) stat_bug = 0;
 }
 
 u8 execute_instruction(u8 op) {
@@ -2949,11 +2980,15 @@ u8 do_interrupts() {
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
                 switch (i) {
-                    case 0: PC = INT_VEC_VBLANK; break;// printf("vb\n"); break;
-                    case 1: PC = INT_VEC_STAT;   break;// printf("st\n");break;
-                    case 2: PC = INT_VEC_TIMER;  break;// printf("tm\n");break;
-                    case 3: PC = INT_VEC_SERIAL; break;// printf("sr\n");break;
-                    case 4: PC = INT_VEC_JOYPAD; printf("jp\n");break;
+                    case 0: 
+                        PC = INT_VEC_VBLANK; break; //printf("vb\n"); break;
+                    case 1: 
+                        PC = INT_VEC_STAT; 
+                        //stat_irq_flag = 0; 
+                        break; //printf("st\n");break;
+                    case 2: PC = INT_VEC_TIMER;  break; //printf("tm\n");break;
+                    case 3: PC = INT_VEC_SERIAL; break; //printf("sr\n");break;
+                    case 4: PC = INT_VEC_JOYPAD; break; //printf("jp\n");break;
                 }
                 tick();
                 cycles = 20;
@@ -2974,13 +3009,13 @@ void cpu_update()
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
-    int cycles_this_update = 0;
+    int cycles_this_update = 1;
 
     while (cycles_this_update < MAXDOTS)
     {
         u8 show_logs = 0;
         if (show_logs) {
-            if (counter % 100 == 0)
+            if (counter > 115000 && counter < 120000)
             {
                 printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d\n",
                     counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),

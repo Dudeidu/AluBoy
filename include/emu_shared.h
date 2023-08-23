@@ -210,18 +210,13 @@ extern u8   vram[2 * BANKSIZE_VRAM];
 extern u8   oam[0xA0];
 
 extern u8   interrupts_enabled; // IME flag
+extern u8   stat_irq_flag;      // STAT register interrupt request
+extern u8   stat_bug;       // if true, all STAT flags are enabled for 1 cycle
 
 extern u8   lcd_mode;       // vblank/hblank/oam search/pixel rendering...
 extern u8   lcd_enabled;
 
 extern u8   input_updated;   // whether the inputs were already fetched this frame
 
-// shared functions
-extern void input_tick();
-extern void input_joypad_update();
-
-extern void ppu_tick(u8 cycles);
-extern void ppu_update_palette(u8 reg, u8 value);
-extern void ppu_clear_screen();
 
 #endif EMU_SHARED_H

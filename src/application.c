@@ -20,6 +20,9 @@ SDL_Window* window = NULL;
 SDL_Event   window_event;
 const Uint8* kb_state;
 
+const char* rom_file_name = "pokemon red.gb";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/";
+
 int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
@@ -127,9 +130,16 @@ int application_init(const char* title) {
         return -1;
     }
 
-    // Open rom
-    //rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/Pokemon Red.gb");
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/tests/dmg-acid2/dmg-acid2.gb");
+    // Load ROM
+
+    /*
+    char *combined_path = combine_strings(rom_file_path, rom_file_name);
+    if (combined_path != NULL) {
+        printf("Combined Path: %s\n", combined_path);
+        free(combined_path);
+    }
+    */
+    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/pokemon red.gb");
     //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
