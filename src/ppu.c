@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "emu_shared.h"
 
 // external functions
@@ -115,7 +116,7 @@ void ppu_clear_screen() {
     clear bits 0 and 1 (background enable and object enable) of the LCDC register 
     set LY to 0.
     */
-    printf("lcd disabled\n");
+    //printf("lcd disabled\n");
 
     RESET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE);
     RESET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE);

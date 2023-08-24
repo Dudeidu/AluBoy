@@ -20,6 +20,8 @@ extern void ppu_tick(u8 cycles);
 extern void ppu_update_palette(u8 reg, u8 value);
 extern void ppu_clear_screen();
 
+#define AUTOSAVE_INTERVAL 18000 // frame interval between automatic saves
+
 // Determines how many CPU cycles each instruction takes to perform
 u8 op_cycles_lut[]  = {
      4,12, 8, 8, 4, 4, 8, 4,20, 8, 8, 8, 4, 4, 8, 4,
@@ -40,6 +42,7 @@ u8 op_cycles_lut[]  = {
     12,12, 8, 4, 0,16, 8,16,12, 8,16, 4, 0, 0, 8,16
 };
 // DMG boot rom
+/*
 u8 boot_rom[] = { 
     0x31, 0xFE, 0xFF, 0xAF, 0x21, 0xFF, 0x9F, 0x32, 0xCB, 0x7C, 0x20, 0xFB, 0x21, 0x26, 0xFF, 0x0E,
     0x11, 0x3E, 0x80, 0x32, 0xE2, 0x0C, 0x3E, 0xF3, 0xE2, 0x32, 0x3E, 0x77, 0x77, 0x3E, 0xFC, 0xE0,
@@ -58,6 +61,7 @@ u8 boot_rom[] = {
     0x21, 0x04, 0x01, 0x11, 0xA8, 0x00, 0x1A, 0x13, 0xBE, 0x20, 0xFE, 0x23, 0x7D, 0xFE, 0x34, 0x20,
     0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50
 };
+*/
 
 // Define shared memory
 u8  reg[0x100];     // Refers to Register enum
@@ -87,6 +91,8 @@ u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
 u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
 
 u8 has_battery;     // whether to import/export the external ram to a file (.sav)
+u8 save_enabled = 0; // if true, save at the end of this frame
+u8 autosave_counter;
 
 // Hardware timers
 u8  double_speed;
@@ -133,6 +139,7 @@ u8 test_finished = 0;
 void tick();
 void update_timers(u8 cycles);
 u8 do_interrupts();
+void save();
 
 // Arithmetic
 void inc_u8(u8* a) {
@@ -311,6 +318,25 @@ u8 interrupt_is_pending() {
     return (((reg[REG_IE] & 0x1F) & (reg[REG_IF] & 0x1F)) != 0);
 }
 
+// Dump ERAM to [.sav] file
+void save() {
+    if (!has_battery) return;
+
+    const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
+    char* save_path = combine_strings(path_arr, 3);
+    if (save_path != NULL) {
+        size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
+        int success;
+        success = SaveBuffer(save_path, eram, buffer_size);
+        if (success) {
+            printf("save written to disk.\n");
+        }
+        else {
+            printf("could not write save to disk.\n");
+        }
+        free(save_path);
+    }
+}
 
 int power_up()
 {
@@ -517,11 +543,21 @@ int cpu_init(u8* rom_buffer)
             save_buffer = LoadBuffer(save_path);
             free(save_path);
         }
+        else {
+            printf("no save data found.\n");
+        }
         if (save_buffer != NULL && eram != NULL)
         {
             memcpy(eram, save_buffer, buffer_size);
             free(save_buffer);
+
+            printf("save loaded from disk.\n");
         }
+
+        autosave_counter = 0;
+    }
+    else {
+        save_enabled = 0;
     }
 
     // Licensee code
@@ -911,7 +947,7 @@ int write(u16 addr, u8 value)
                                 lcd_enabled = 0;
                             }
                             else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
-                                printf("lcd enabled\n");
+                                //printf("lcd enabled\n");
                                 lcd_enabled = 1;
                             }
                             reg[REG_LCDC] = value;
@@ -3019,8 +3055,10 @@ void cpu_update()
     u8 cycles;
     int cycles_this_update = 1;
 
+    //printf("ly start: %d,", reg[REG_LY]);
     while (cycles_this_update < MAXDOTS)
     {
+        u8 ly_start = reg[REG_LY];
         u8 show_logs = 0;
         if (show_logs) {
             if (counter > 115000 && counter < 120000)
@@ -3081,7 +3119,17 @@ void cpu_update()
             reg[REG_SC] = 0x0;
         }
         */
-        
+        // vsync - end frame every full screen cycle
+        if (lcd_enabled && ly_start != reg[REG_LY] && reg[REG_LY] == 0) break;
+    }
+    //printf("ly end: %d cycles: %d\n", reg[REG_LY], cycles_this_update);
+    // Autosaving
+    if (save_enabled) {
+        autosave_counter++;
+        if (autosave_counter >= AUTOSAVE_INTERVAL) {
+            save();
+            autosave_counter = 0;
+        }
     }
 }
 
@@ -3089,18 +3137,7 @@ void cpu_cleanup()
 {
     if (rom) free(rom);
     if (eram) {
-        // dump eram to .sav file
-        if (has_battery) {
-            const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
-            char* save_path = combine_strings(path_arr, 3);
-            if (save_path != NULL) {
-                size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
-                int success;
-                success = SaveBuffer(save_path, eram, buffer_size);
-
-                free(save_path);
-            }
-        }
+        save();
         free(eram);
     }
 }
