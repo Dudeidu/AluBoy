@@ -50,8 +50,6 @@ extern "C" {
     typedef unsigned short  u16;
     typedef unsigned int    u32;
 
-    extern DLL_EXPORT u8 shl(u8 x);
-
     /// <summary>
     /// Generic bitfield union.
     /// Not very portable due to how different compilers handle bitfields.

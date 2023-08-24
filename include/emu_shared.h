@@ -10,19 +10,6 @@
 #define BANKSIZE_VRAM   0x2000
 #define BANKSIZE_WRAM   0x1000
 
-
-/* Scan lines 0~143 consists of :
-MODE 2 (80 dots) OAM scan
-MODE 3 (172~289 dots) drawing pixels
-MODE 0 (86~204 dots) horizontal blank
-
-Scan lines 144~153:
-MODE 1 (Scanlines 144~153) Vertical blank - everything is accessible
-
-In MODE 2+3 - OAM inaccessible (except by DMA)
-In MODE 3 - VRAM ($8000–9FFF) inaccessible, CGB palettes inaccessible
-
-When an action lengthens MODE 3 it means that MODE 0 is shortened by the same amount */
 /*
 u8 boot_rom[] = { // Open-source boot rom
     0x31, 0xFE, 0xFF, 0x21, 0xFF, 0x9F, 0xAF, 0x32, 0xCB, 0x7C, 0x20, 0xFA, 0x0E, 0x11, 0x21, 0x26,
@@ -205,6 +192,9 @@ static const int MAXDOTS = 70224; // 154 scanlines per frame, 456 dots per scanl
 static const int SCANLINE_DOTS = 456; // dots per scanline
 
 // Declare shared memory
+extern const char* rom_file_name;
+extern const char* rom_file_path;
+
 extern u8   reg[0x100];     // Refers to Register enum
 extern u8   vram[2 * BANKSIZE_VRAM];
 extern u8   oam[0xA0];

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "alu_binary.h"
+#include "alu_io.h"
 #include "emu_shared.h"
 #include "macros.h"
 
@@ -491,21 +492,35 @@ int cpu_init(u8* rom_buffer)
     }
 
     // TODO - load save file if exists
-    if (eram != NULL) free(eram);
+    if (eram != NULL) {
+        free(eram);
+        eram = NULL;
+    }
     if (eram_banks > 0) {
-        eram = (u8*)malloc(sizeof(u8) * eram_banks * BANKSIZE_ERAM);
-        // load save file if exists
-        if (has_battery) {
-            //load_save();
-        }
+        size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
+        eram = (u8*)malloc(buffer_size);
     }
     else {
         // MBC2 has built in ram (512x4 bits)
-        if (mbc == 2) {
-            eram = (u8*)malloc(512);
+        eram = (mbc == 2) ? (u8*)malloc(512) : NULL;
+    }
+
+    // load save file if exists
+    if (has_battery) {
+        size_t buffer_size = (mbc == 2) ? 512 : sizeof(u8) * eram_banks * BANKSIZE_ERAM;
+
+        // Load save
+        const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
+        char* save_path = combine_strings(path_arr, 3);
+        char* save_buffer = NULL;
+        if (save_path != NULL) {
+            save_buffer = LoadBuffer(save_path);
+            free(save_path);
         }
-        else {
-            eram = NULL;
+        if (save_buffer != NULL && eram != NULL)
+        {
+            memcpy(eram, save_buffer, buffer_size);
+            free(save_buffer);
         }
     }
 
@@ -521,14 +536,7 @@ int cpu_init(u8* rom_buffer)
     checksum_header     = rom[ROM_HEADER_CHECKSUM];
     checksum_global     = rom[ROM_GLOBAL_CHECKSUM] << 8 || rom[ROM_GLOBAL_CHECKSUM + 1];
 
-    
     printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n", cart_type, mbc, rom_banks, eram_banks);
-
-    //AF.high = GET_BIT(AF.high, 3);
-    //RESET_BIT(AF.high, 3);
-    //printf("AF: %04X\n", AF.full);
-    //SET_BIT(AF.high, 3);
-    //printf("AF: %04X\n", AF.full);
 
     power_up();
 
@@ -3080,5 +3088,19 @@ void cpu_update()
 void cpu_cleanup()
 {
     if (rom) free(rom);
-    if (eram) free(eram);
+    if (eram) {
+        // dump eram to .sav file
+        if (has_battery) {
+            const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
+            char* save_path = combine_strings(path_arr, 3);
+            if (save_path != NULL) {
+                size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
+                int success;
+                success = SaveBuffer(save_path, eram, buffer_size);
+
+                free(save_path);
+            }
+        }
+        free(eram);
+    }
 }

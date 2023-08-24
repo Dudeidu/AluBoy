@@ -212,7 +212,6 @@ int create_rgba_buffer()
 {
     // The actual colors (each pixel gets 4 bytes: r,g,b,a)
     rgba_buffer = (u8*)calloc(SCREEN_WIDTH * SCREEN_HEIGHT * 4, sizeof(u8));
-    //rgba_buffer = (uint8_t*)malloc(160 * 144 * 4);
     if (rgba_buffer == NULL)
     {
         fprintf(stderr, "Failed to allocate memory for the rgba buffer!\n");

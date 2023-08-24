@@ -4,5 +4,6 @@
 #define _INC_ALU_H
 
 #include "alu_binary.h"
+#include "alu_io.h"
 
 #endif

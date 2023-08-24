@@ -1,14 +1,13 @@
 #include "application.h"
 #include "macros.h"
 
-
 #include <stdio.h>
 #include <string.h>
 
 #include <SDL.h>
 #include <GL/glew.h>
-
 #include <SDL_opengl.h>
+#include <alu_io.h>
 
 #include "graphics.h"
 #include "cpu.h"
@@ -20,13 +19,13 @@ SDL_Window* window = NULL;
 SDL_Event   window_event;
 const Uint8* kb_state;
 
-const char* rom_file_name = "pokemon red.gb";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/";
-
+int         window_scale = 4;
 int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
-int         window_scale = 4;
+// shared variables
+const char* rom_file_name = "pokemon red";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/";
 
 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -41,61 +40,12 @@ int EventFilter(void* userdata, SDL_Event* event) {
     return 0; // Ignore the event
 }
 
-/// <summary>
-/// Stores the contents of a file into a buffer and returns a pointer to it.
-/// </summary>
-u8* LoadROM(const char* fname) {
-    u8*     buffer;
-    size_t  bytes_read;
-    long    buffer_size;
-    FILE*   fp;
-
-    fp = fopen(fname, "rb");
-    if (fp == NULL) {
-        fprintf(stderr, "Failed to open file: %s\n", fname);
-        perror("Error: ");
-        return NULL;
-    }
-    // Get the file size
-    fseek(fp, 0L, SEEK_END);
-    buffer_size = ftell(fp);
-    fseek(fp, 0L, SEEK_SET);
-
-    // Copy the file contents to a buffer
-    buffer = (u8*)malloc(sizeof(u8) * buffer_size);
-    if (buffer == NULL)
-    {
-        perror("Error: ");
-        fclose(fp);
-        return NULL;
-    }
-    
-    bytes_read = fread(buffer, 1, buffer_size, fp);
-    if (bytes_read != (size_t)buffer_size)
-    {
-        perror("Error: ");
-        free(buffer);
-        fclose(fp);
-        return NULL;
-    }
-
-    /*
-    for (int i = 0; i < sz; i++)
-    {
-        if (i % 16 == 0) printf("\n");
-        printf("%02X ", buffer[i]);
-    }
-    */
-
-
-    fclose(fp);
-    return buffer;
-    
-}
-
 int application_init(const char* title) {
-    
-    u8* rom_buffer;
+    const char* path_arr[] = { rom_file_path, rom_file_name, ".gb"};
+
+    char*   rom_path    = NULL;
+    u8*     rom_buffer  = NULL;
+    int     num_keys;
 
     // Initialize SDL Video
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -119,7 +69,6 @@ int application_init(const char* title) {
 
     // Set the event filter
     //SDL_SetEventFilter(EventFilter, NULL); // NULL for user data
-    int num_keys;
     kb_state = SDL_GetKeyboardState(&num_keys);
     
     // Initialize OpenGL stuff
@@ -131,16 +80,11 @@ int application_init(const char* title) {
     }
 
     // Load ROM
-
-    /*
-    char *combined_path = combine_strings(rom_file_path, rom_file_name);
-    if (combined_path != NULL) {
-        printf("Combined Path: %s\n", combined_path);
-        free(combined_path);
+    rom_path = combine_strings(path_arr, 3);
+    if (rom_path != NULL) {
+        rom_buffer = LoadBuffer(rom_path);
+        free(rom_path);
     }
-    */
-    rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/pokemon red.gb");
-    //u8* rom_buffer = LoadROM("C:/dev/AluBoy/AluBoy/resources/roms/start_inc_1_cgb04c_out1E.gbc");
     if (rom_buffer == NULL)
     {
         graphics_cleanup();
@@ -148,6 +92,7 @@ int application_init(const char* title) {
         SDL_Quit();
         return -1;
     }
+    
 
     // Initialize emulator cpu
     if (cpu_init(rom_buffer) == -1)
@@ -170,7 +115,6 @@ int application_init(const char* title) {
 
     return 0;
 }
-
 
 void application_update() {
     
