@@ -24,7 +24,7 @@ int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "super mario land 2";
+const char* rom_file_name = "legend of zelda";
 const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/";
 
 

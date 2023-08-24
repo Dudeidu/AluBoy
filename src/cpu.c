@@ -92,7 +92,7 @@ u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
 
 u8 has_battery;     // whether to import/export the external ram to a file (.sav)
 u8 save_enabled = 0; // if true, save at the end of this frame
-u8 autosave_counter;
+int autosave_counter;
 
 // Hardware timers
 u8  double_speed;
@@ -368,6 +368,9 @@ int power_up()
     rom_bank_2 = 0;
     eram_enabled = 0;
 
+    for (int i = 0; i <= 0xFF; i++) {
+        reg[i] = 0xFF;
+    }
     reg[REG_P1] = 0xCF;
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
@@ -424,7 +427,7 @@ int power_up()
 
     reg[REG_KEY1] = 0xFF;
 
-    reg[REG_VBK] = 0x00;
+    reg[REG_VBK] = 0xFF;
     reg[REG_HDMA1] = 0xFF;
     reg[REG_HDMA2] = 0xFF;
     reg[REG_HDMA3] = 0xFF;
@@ -555,6 +558,7 @@ int cpu_init(u8* rom_buffer)
         }
 
         autosave_counter = 0;
+        save_enabled = 1;
     }
     else {
         save_enabled = 0;
@@ -607,7 +611,7 @@ u8 read(u16 addr)
             // VRAM
             if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
 
-            if (cgb_flag)   return vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)];
+            if (cgb_flag)   return vram[(addr - MEM_VRAM) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
             else            return vram[addr - MEM_VRAM];
             break;
         case 0xA:
@@ -650,6 +654,8 @@ u8 read(u16 addr)
                         return reg[REG_P1];
                     case REG_SB:
                         return 0xFF;
+                    case REG_DIV:
+                        return reg[REG_DIV];
                     case REG_OBPD:
                         if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
                         return reg[REG_OBPD];
@@ -855,7 +861,7 @@ int write(u16 addr, u8 value)
                 // VRAM
                 if (lcd_mode == LCD_MODE_VRAM) return -1;
 
-                if (cgb_flag)   vram[(addr - MEM_VRAM) + (reg[REG_VBK] * BANKSIZE_VRAM)] = value;
+                if (cgb_flag)   vram[(addr - MEM_VRAM) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
                 else            vram[addr - MEM_VRAM] = value;
                 break;
             case 0xA:
@@ -935,7 +941,10 @@ int write(u16 addr, u8 value)
                                 printf("interrupt requested: joypad\n");
                             }
                             */
-                            reg[REG_IF] = value;
+                            reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
+                            break;
+                        case 0x50: // BOOT register (read only)
+                            return -1;
                             break;
                         case REG_LCDC:
                             if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
@@ -996,7 +1005,7 @@ int write(u16 addr, u8 value)
                     hram[addr - MEM_HRAM] = value;  // Convert to range 0-127
                 }
                 // Interrupt Enable register (IE)
-                else {
+                else if (addr == MEM_IE){
                     // DEBUG
                     /*
                     if (GET_BIT(value, 0) != GET_BIT(reg[REG_IE], 0)) {
@@ -3053,7 +3062,7 @@ void cpu_update()
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
-    int cycles_this_update = 1;
+    int cycles_this_update = 0;
 
     //printf("ly start: %d,", reg[REG_LY]);
     while (cycles_this_update < MAXDOTS)
@@ -3061,11 +3070,11 @@ void cpu_update()
         u8 ly_start = reg[REG_LY];
         u8 show_logs = 0;
         if (show_logs) {
-            if (counter > 115000 && counter < 120000)
+            if (counter > 120000 && counter < 125000)
             {
-                printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d\n",
-                    counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted);
+                printf("%06d %06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X TIMA=%02X\n",
+                    counter, cycles_this_update, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
+                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], reg[REG_TIMA]);
                 /*
                 printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
                     counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,

@@ -83,6 +83,8 @@ int ppu_init()
         return -1;
     }
 
+    lcd_mode_next = SCANLINE_DOTS;
+
     redraw_flag = 1;
     return 0;
 }
@@ -132,7 +134,7 @@ void ppu_clear_screen() {
     reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
     
     lcd_mode = LCD_MODE_HBLANK;
-    //lcd_mode_next = SCANLINE_DOTS;
+    lcd_mode_next = SCANLINE_DOTS;
 
     memset(background_buffer, MEM_ROM_0, buffer_size);
 }

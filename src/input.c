@@ -7,8 +7,8 @@
 
 // Last input retrieved
 u8 inputs[8];
-u8 inputs_direction;
-u8 inputs_action;
+u8 inputs_direction = 0x0F;
+u8 inputs_action = 0x0F;
 u8 inputs_update_line;
 
 u8 input_updated = 0;      // whether the inputs were already fetched this frame
