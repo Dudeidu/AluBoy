@@ -92,6 +92,7 @@ u8  hram[0x80];
 u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
 u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
 
+u8 cgb_mode = 0;
 u8 has_battery;     // whether to import/export the external ram to a file (.sav)
 u8 save_enabled = 0; // if true, save at the end of this frame
 int autosave_counter;
@@ -102,10 +103,12 @@ u16 div_counter;    // every >256, DIV++
 u8  timer_enabled;  // bit  2   of reg TAC
 u16 timer_speed;    // bits 0-1 of reg TAC
 u16 timer_counter;  // every >timer_speed, TIMA++
+u8  tima_reload_delay = 0; // emulates a timer quirk: when the timer overflows, the TIMA register contains 00 for 4 cycles
 
 u8  halted;
 u8  ei_flag;        
 u8  dma_transfer_flag; // whether a dma transfer is currently running
+u8  dma_access_flag; // allows bypassing the DMA memory blocking when its the DMA itself doing accessing the memory
 u8  dma_index;      // 0x00-0x9F
 
 // Header information
@@ -132,6 +135,8 @@ u8  mbc_mode;       // For mbc1 only - 0: 2MiB ROM/8KiB RAM | 1: 512KiB ROM/4*8K
 u8  rtc_latch_flag;
 u8  rtc_latch_reg;
 u8  rtc_select_reg; // Indicated which RTC register is currently mapped into memory at A000 - BFFF
+
+int cycles_this_update = 0;
 
 // Tests
 int emu_seconds = 0;
@@ -388,6 +393,7 @@ int power_up()
     reg[REG_TAC] = 0xF8;
     timer_speed = 256;
     timer_enabled = 0;
+    timer_counter = 205;
 
     reg[REG_IF] = 0xE1;
 
@@ -435,7 +441,7 @@ int power_up()
 
     reg[REG_KEY1] = 0xFF;
 
-    reg[REG_VBK] = 0xFF;
+    reg[REG_VBK] = 0x0;
     reg[REG_HDMA1] = 0xFF;
     reg[REG_HDMA2] = 0xFF;
     reg[REG_HDMA3] = 0xFF;
@@ -478,6 +484,7 @@ int cpu_init(u8* rom_buffer)
 
     // CGB Indicator
     cgb_flag = rom[ROM_CGB_FLAG] == 0x80;
+    cgb_mode = 0;
     printf("CGB: %s\n", cgb_flag ? "true" : "false");
 
     // SGB Indicator
@@ -596,6 +603,10 @@ u8 read(u16 addr)
     // TODO - I/O register reading rules
 
     u8 msb = (u8)(addr >> 12);
+
+    if (dma_transfer_flag && (addr != (0xFF00 | REG_DMA)) && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
+        return 0xFF;
+
     switch (msb) {
         case 0x0:
         case 0x1:
@@ -619,8 +630,8 @@ u8 read(u16 addr)
             // VRAM
             if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
 
-            if (cgb_flag)   return vram[(addr - MEM_VRAM) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
-            else            return vram[addr - MEM_VRAM];
+            if (cgb_mode)   return vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
+            else            return vram[addr & 0x1FFF];
             break;
         case 0xA:
         case 0xB:
@@ -646,7 +657,7 @@ u8 read(u16 addr)
         case 0xF:
             // WRAM Bank / ECHO RAM
             if (addr < MEM_OAM) {
-                if (cgb_flag)   return wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)];
+                if (cgb_mode)   return wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)];
                 else            return wram[addr & 0x1FFF];
             }
             // Object attribute memory (OAM)
@@ -654,6 +665,15 @@ u8 read(u16 addr)
                 if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
 
                 return oam[addr - MEM_OAM]; // Convert to range 0-159
+            }
+            // Unusable area
+            else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
+                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
+                {
+                    // TODO OAM corruption
+                    return 0xFF;
+                }
+                return 0x00;
             }
             // I/O Registers
             else if (addr >= MEM_IO && addr < MEM_HRAM) {
@@ -664,6 +684,8 @@ u8 read(u16 addr)
                         return 0xFF;
                     case REG_DIV:
                         return reg[REG_DIV];
+                    case REG_TIMA:
+                        return (tima_reload_delay > 0) ? 0x00 : reg[REG_TIMA];
                     case REG_OBPD:
                         if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
                         return reg[REG_OBPD];
@@ -687,6 +709,10 @@ int write(u16 addr, u8 value)
 {
     // TODO - I/O register writing rules
     u8 msb = (u8)(addr >> 12);
+
+    if ((addr != (0xFF00 | REG_DMA)) && dma_transfer_flag && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
+        return -1;
+
     // MBC Registers
     if (msb < 0x8) {
         switch (mbc) {
@@ -869,8 +895,8 @@ int write(u16 addr, u8 value)
                 // VRAM
                 if (lcd_mode == LCD_MODE_VRAM) return -1;
 
-                if (cgb_flag)   vram[(addr - MEM_VRAM) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
-                else            vram[addr - MEM_VRAM] = value;
+                if (cgb_mode)   vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
+                else            vram[addr & 0x1FFF] = value;
                 break;
             case 0xA:
             case 0xB:
@@ -899,7 +925,7 @@ int write(u16 addr, u8 value)
             case 0xF:
                 // WRAM Bank / ECHO RAM
                 if (addr < MEM_OAM) {
-                    if (cgb_flag)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
+                    if (cgb_mode)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
                     else            wram[addr & 0x1FFF] = value;
                 }
                 // Object attribute memory (OAM)
@@ -907,6 +933,9 @@ int write(u16 addr, u8 value)
                     if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return -1;
 
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
+                }
+                else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
+                    return -1;
                 }
                 // I/O Registers
                 else if (addr >= MEM_IO && addr < MEM_HRAM) {
@@ -916,8 +945,36 @@ int write(u16 addr, u8 value)
                             reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
                             break;
                         case REG_DIV:
-                            reg[REG_DIV] = 0;
+                            // emulates the internal div counter's bits changing 
+                            // from high to low which in turn triggers a timer increment.
+                            if ((timer_speed == 1024 && reg[REG_DIV] > 1        ) || // bit 9
+                                (timer_speed == 16   && GET_BIT(div_counter, 3) ) || // bit 3
+                                (timer_speed == 64   && GET_BIT(div_counter, 5) ) || // bit 5
+                                (timer_speed == 256  && GET_BIT(div_counter, 7)))    // bit 7
+                            {
+                                u8 tima_old = reg[REG_TIMA];
+                                reg[REG_TIMA] = (tima_old + 1) & 0xFF;
+                                // if overflow occured
+                                if (reg[REG_TIMA] < tima_old) {
+                                    reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
+                                    tima_reload_delay = 4;
+                                    // Timer interrupt
+                                    SET_BIT(reg[REG_IF], INT_BIT_TIMER);
+                                }
+                            }
                             div_counter = 0;
+                            timer_counter = 0;
+                            reg[REG_DIV] = 0;
+                            break;
+                        case REG_TIMA:
+                            if (tima_reload_delay == 0) {
+                                reg[REG_TIMA] = value;
+                            }
+                            break;
+                        case REG_TMA:
+                            if (tima_reload_delay == 0) {
+                                reg[REG_TMA] = value;
+                            }
                             break;
                         case REG_TAC:
                             // bit 0–1: Select at which frequency TIMA increases
@@ -929,27 +986,9 @@ int write(u16 addr, u8 value)
                             }
                             // bit 2: Enable timer
                             timer_enabled = GET_BIT(value, 2);
-                            reg[addr & 0xFF] = value;
+                            reg[REG_TAC] = value;
                             break;
                         case REG_IF:
-                            // DEBUG
-                            /*
-                            if (GET_BIT(value, 0) != GET_BIT(reg[REG_IF], 0)) {
-                                printf("interrupt requested: vblank\n");
-                            }
-                            if (GET_BIT(value, 1) != GET_BIT(reg[REG_IF], 1)) {
-                                printf("interrupt requested: stat\n");
-                            }
-                            if (GET_BIT(value, 2) != GET_BIT(reg[REG_IF], 2)) {
-                                printf("interrupt requested: timer\n");
-                            }
-                            if (GET_BIT(value, 3) != GET_BIT(reg[REG_IF], 3)) {
-                                printf("interrupt requested: serial\n");
-                            }
-                            if (GET_BIT(value, 4) != GET_BIT(reg[REG_IF], 4)) {
-                                printf("interrupt requested: joypad\n");
-                            }
-                            */
                             reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
                             break;
                         case 0x50: // BOOT register (read only)
@@ -981,7 +1020,7 @@ int write(u16 addr, u8 value)
                             // so it does not block if Mode 0 is enabled as well.
                             reg[REG_STAT] = value ;
                             if (lcd_enabled) {
-                                if (!cgb_flag) stat_bug = 1;
+                                if (!cgb_mode) stat_bug = 1;
                                 check_stat_irq(0);
                             }
                             break;
@@ -1035,24 +1074,6 @@ int write(u16 addr, u8 value)
                 }
                 // Interrupt Enable register (IE)
                 else if (addr == MEM_IE){
-                    // DEBUG
-                    /*
-                    if (GET_BIT(value, 0) != GET_BIT(reg[REG_IE], 0)) {
-                        printf("interrupt %s: vblank\n", GET_BIT(value, 0) ? "enabled" : "disabled");
-                    }
-                    if (GET_BIT(value, 1) != GET_BIT(reg[REG_IE], 1)) {
-                        printf("interrupt %s: stat\n", GET_BIT(value, 1) ? "enabled" : "disabled");
-                    }
-                    if (GET_BIT(value, 2) != GET_BIT(reg[REG_IE], 2)) {
-                        printf("interrupt %s: timer\n", GET_BIT(value, 2) ? "enabled" : "disabled");
-                    }
-                    if (GET_BIT(value, 3) != GET_BIT(reg[REG_IE], 3)) {
-                        printf("interrupt %s: serial\n", GET_BIT(value, 3) ? "enabled" : "disabled");
-                    }
-                    if (GET_BIT(value, 4) != GET_BIT(reg[REG_IE], 4)) {
-                        printf("interrupt %s: joypad\n", GET_BIT(value, 4) ? "enabled" : "disabled");
-                    }
-                    */
                     reg[REG_IE] = value;
                 }
         }
@@ -1905,6 +1926,22 @@ u8 execute_cb(u8 op) {
 
 void tick() {
     u8 cycles = 4 >> double_speed;
+
+    // DMA transfer is running
+    if (dma_transfer_flag) {
+        dma_access_flag = 1;
+        u8 t_u8 = read((reg[REG_DMA] << 8) | dma_index);
+        dma_access_flag = 0;
+
+        oam[dma_index] = t_u8;
+        dma_index++;
+
+        if (dma_index > 0x9F) {
+            dma_index = 0;
+            dma_transfer_flag = 0;
+        }
+    }
+
     input_tick();
     update_timers(cycles);
     ppu_tick(double_speed ? (cycles >> 1) : cycles);
@@ -3006,6 +3043,7 @@ u8 execute_instruction(u8 op) {
 void update_timers(u8 cycles) {
     u8 clock = (cycles);
 
+
     // DIV is incremented at 16384Hz / 32768Hz in double speed
     div_counter += clock;
     if (div_counter > 0xFF) {
@@ -3014,12 +3052,24 @@ void update_timers(u8 cycles) {
         reg[REG_DIV] = (reg[REG_DIV] + 1) & 0xFF;
     }
 
+    // TIMA reload delay
+    if (tima_reload_delay > 0) {
+        if ((s8)tima_reload_delay - clock >= 0) tima_reload_delay -= clock;
+        else {
+            tima_reload_delay = 0;
+        }
+        // Timer interrupt
+        if (tima_reload_delay == 0) {
+            SET_BIT(reg[REG_IF], INT_BIT_TIMER);
+        }
+    }
+
     // TIMA is incremented at the clock frequency specified by the TAC register
     if (timer_enabled) {
         u16 sp = (timer_speed);
 
         timer_counter += clock;
-        while (timer_counter > sp) {
+        while (timer_counter >= sp) {
             timer_counter -= sp;
 
             u8 tima_old = reg[REG_TIMA];
@@ -3028,10 +3078,7 @@ void update_timers(u8 cycles) {
             if (reg[REG_TIMA] < tima_old) {
                 reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
 
-                // Timer interrupt
-                SET_BIT(reg[REG_IF], INT_BIT_TIMER);
-                //printf("int request: timer\n");
-
+                tima_reload_delay = 4;
             }
         }
     }
@@ -3094,7 +3141,6 @@ void cpu_update()
 {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
-    int cycles_this_update = 0;
 
     //printf("ly start: %d,", reg[REG_LY]);
     while (cycles_this_update < MAXDOTS)
@@ -3123,27 +3169,13 @@ void cpu_update()
             }
         }
 
-        // DMA transfer is running
-        if (dma_transfer_flag) {
-            u8 t_u8 = read((reg[REG_DMA] << 8) | dma_index);
-            tick();
-            oam[dma_index] = t_u8;
-            dma_index++;
-            cycles = 4;
-
-            if (dma_index > 0x9F) {
-                dma_index = 0;
-                dma_transfer_flag = 0;
-            }
-        }
         // normal operation
-        else {
-            if (halted) op = 0x00; // NOOP
-            else op = read(PC++);
-            tick();
+        if (halted) op = 0x00; // NOOP
+        else op = read(PC++);
+        tick();
 
-            cycles = execute_instruction(op);
-        }
+        cycles = execute_instruction(op);
+        
         
         // Interrupt handling
         cycles += do_interrupts();
@@ -3167,6 +3199,8 @@ void cpu_update()
         // vsync - end frame every full screen cycle
         if (lcd_enabled && ly_start != reg[REG_LY] && reg[REG_LY] == 0) break;
     }
+    cycles_this_update -= MAXDOTS;
+
     //printf("ly end: %d cycles: %d\n", reg[REG_LY], cycles_this_update);
     // Autosaving
     if (save_enabled) {

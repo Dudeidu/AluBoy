@@ -24,8 +24,8 @@ int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "mooneye-test-suite/acceptance/oam_dma_timing";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/tests/";
+const char* rom_file_name = "donkey kong land";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -119,8 +119,8 @@ int application_init(const char* title) {
 void application_update() {
     
     u32   current_time      = 0;
-    double   delta             = 0;
-    double timer_total       = 0; // Total game time
+    double   delta          = 0;
+    double timer_total      = 0; // Total game time
     u32   last_frame_time   = SDL_GetTicks(); // Set to current time when difference is bigger than 1/60
     u8    keep_window_open  = 1;
 
