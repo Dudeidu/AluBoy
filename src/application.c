@@ -24,8 +24,8 @@ int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "legend of zelda";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/";
+const char* rom_file_name = "mooneye-test-suite/acceptance/oam_dma_timing";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/tests/";
 
 
 int EventFilter(void* userdata, SDL_Event* event) {

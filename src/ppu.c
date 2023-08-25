@@ -47,6 +47,9 @@ u8 lcd_enabled      = 1;
 u8 stat_irq_flag = 0;
 u8 stat_bug = 0;
 
+// Debugging
+debug_show_line_data = 0;
+
 // FORWARD DECLARE
 void draw_scanline(u8 y);
 void draw_tiles(u8 y);
@@ -167,11 +170,13 @@ void ppu_tick(u8 cycles)
 
         case LCD_MODE_VRAM: // Reading OAM and VRAM to generate the picture
             // request hblank interrupt if enabled
-            check_stat_irq(STAT_INT_HBLANK);
 
             reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
             lcd_mode = LCD_MODE_HBLANK;
             lcd_mode_next = SCANLINE_DOTS;
+
+            // request stat interrupt if enabled
+            check_stat_irq(0);
             break;
 
         case LCD_MODE_HBLANK:
@@ -199,21 +204,21 @@ void ppu_tick(u8 cycles)
                 // Vblank interrupt request
                 SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
 
-                // request hblank interrupt if enabled
-                check_stat_irq(STAT_INT_VBLANK);
-
                 lcd_mode = LCD_MODE_VBLANK;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VBLANK;
                 lcd_mode_next = SCANLINE_DOTS;
+
+                // request stat interrupt if enabled
+                check_stat_irq(1);
             }
             else {
-                // request hblank interrupt if enabled
-                check_stat_irq(STAT_INT_OAM);
-
                 // change lcd mode to oam search (0~80)
                 lcd_mode = LCD_MODE_OAM;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
                 lcd_mode_next = 80;
+
+                // request stat interrupt if enabled
+                check_stat_irq(0);
             }
             break;
 
@@ -223,6 +228,7 @@ void ppu_tick(u8 cycles)
             reg[REG_LY] ++;
 
             check_lyc();
+            check_stat_irq(0);
             
             // if reached last line
             if (reg[REG_LY] >= 154) {
@@ -236,15 +242,15 @@ void ppu_tick(u8 cycles)
                 if (!input_updated) {
                     input_joypad_update();
                 }
-                // request interrupt if enabled
-                check_stat_irq(STAT_INT_OAM);
                 
                 // change lcd mode to oam search (0~80)
                 lcd_mode = LCD_MODE_OAM;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
                 lcd_mode_next = 80;
 
+                // request interrupt if enabled
                 check_lyc();
+                check_stat_irq(0);
             }
             break;
     }
@@ -274,10 +280,14 @@ int compare_object_by_priority(const void* a, const void* b) {
 }
 
 // Request stat interrupt if source is enabled
-void check_stat_irq(u8 stat_int_source) {
-    if (stat_bug || GET_BIT(reg[REG_STAT], stat_int_source)) {
-        if (!stat_irq_flag)
-        {
+void check_stat_irq(u8 vblank_start) {
+    if (stat_bug || (
+        (lcd_mode == LCD_MODE_HBLANK && GET_BIT(reg[REG_STAT], STAT_INT_HBLANK) ) ||
+        (lcd_mode == LCD_MODE_VBLANK && GET_BIT(reg[REG_STAT], STAT_INT_VBLANK) ) ||
+        ((lcd_mode == LCD_MODE_OAM || vblank_start) && GET_BIT(reg[REG_STAT], STAT_INT_OAM) ) ||
+        (GET_BIT(reg[REG_STAT], 2)   && GET_BIT(reg[REG_STAT], STAT_INT_LYC)    )
+        )) {
+        if (!stat_irq_flag) {
             SET_BIT(reg[REG_IF], INT_BIT_STAT);
             stat_irq_flag = 1;
         }
@@ -325,16 +335,10 @@ u8 search_oam(u8 y) {
 void check_lyc() {
     if (reg[REG_LY] == reg[REG_LYC]) SET_BIT(reg[REG_STAT], 2);
     else RESET_BIT(reg[REG_STAT], 2);
-
-    if (GET_BIT(reg[REG_STAT], 2) && GET_BIT(reg[REG_STAT], STAT_INT_LYC))
-    {
-        // request interrupt
-        SET_BIT(reg[REG_IF], INT_BIT_STAT);
-    }
 }
 
 void draw_scanline(u8 y) {
-    //printf("line:%03d bg?:%d obj?:%d ", y, GET_BIT( reg[REG_LCDC], LCDC_BGW_ENABLE), GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE));
+    if (debug_show_line_data) printf("line:%03d bg?:%d obj?:%d ", y, GET_BIT( reg[REG_LCDC], LCDC_BGW_ENABLE), GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE));
     
     if (GET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE)) {
         draw_tiles(y);
@@ -347,12 +351,11 @@ void draw_scanline(u8 y) {
     if (GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE)) {
         draw_objects(y);
     }
-    //printf("\n");
+    if (debug_show_line_data) printf("\n");
 }
 
 // Draws the Background & Window
 void draw_tiles(u8 y) {
-    //printf("y: %d, winy: %d\n", y, window_line);
     u16 y_screen_width = y * SCREEN_WIDTH;
     
     u8  sx      = reg[REG_SCX];
@@ -482,7 +485,7 @@ void draw_tiles(u8 y) {
             
     }
 
-    //printf("sx:%03d sy:%03d wx:%03d wy:%03d w_inline:%d bg_inline:%d ", sx, sy, wx, wy, window_in_line, bg_in_line);
+    if (debug_show_line_data) printf("sx:%03d sy:%03d wx:%03d wy:%03d w_inline:%d bg_inline:%d ", sx, sy, wx, wy, window_in_line, bg_in_line);
 }
 
 void draw_objects(u8 y) {
@@ -493,7 +496,7 @@ void draw_objects(u8 y) {
     u8 lcdc = reg[REG_LCDC];
     u8 obj_height = GET_BIT(lcdc, LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
 
-    //printf("obj count: %02d ", object_count);
+    if (debug_show_line_data) printf("obj count: %02d ", object_count);
 
     // iterate through all sprites, draw if pixel intercects with our scanline
     for (s8 obj = 0; obj < object_count; obj++) {

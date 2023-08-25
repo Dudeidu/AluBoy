@@ -19,6 +19,8 @@ extern void input_tick();
 extern void ppu_tick(u8 cycles);
 extern void ppu_update_palette(u8 reg, u8 value);
 extern void ppu_clear_screen();
+extern void check_stat_irq(u8 vblank_start);
+extern void check_lyc();
 
 #define AUTOSAVE_INTERVAL 18000 // frame interval between automatic saves
 
@@ -102,6 +104,7 @@ u16 timer_speed;    // bits 0-1 of reg TAC
 u16 timer_counter;  // every >timer_speed, TIMA++
 
 u8  halted;
+u8  ei_flag;        
 u8  dma_transfer_flag; // whether a dma transfer is currently running
 u8  dma_index;      // 0x00-0x9F
 
@@ -132,7 +135,10 @@ u8  rtc_select_reg; // Indicated which RTC register is currently mapped into mem
 
 // Tests
 int emu_seconds = 0;
-u8 test_finished = 0;
+int counter = 1;
+u8 debug_show_tracelog = 0;
+int debug_tracelog_interval = 1;
+int debug_tracelog_start = 0;
 
 
 // Forward declarations
@@ -361,6 +367,7 @@ int power_up()
     PC = 0x0100;
 
     interrupts_enabled = 0;
+    ei_flag = 0;
     halted = 0;
 
     mbc_mode = 0;
@@ -375,6 +382,7 @@ int power_up()
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
     reg[REG_DIV] = 0xAB;
+    div_counter = 205;
     reg[REG_TIMA] = 0x00;
     reg[REG_TMA] = 0x00;
     reg[REG_TAC] = 0xF8;
@@ -668,7 +676,7 @@ u8 read(u16 addr)
                 return hram[addr - MEM_HRAM];  // Convert to range 0-127
             }
             // Interrupt Enable register (IE)
-            else {
+            else if (addr == MEM_IE) {
                 return reg[REG_IE];
             }
     }
@@ -909,6 +917,7 @@ int write(u16 addr, u8 value)
                             break;
                         case REG_DIV:
                             reg[REG_DIV] = 0;
+                            div_counter = 0;
                             break;
                         case REG_TAC:
                             // bit 0–1: Select at which frequency TIMA increases
@@ -958,6 +967,8 @@ int write(u16 addr, u8 value)
                             else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
                                 //printf("lcd enabled\n");
                                 lcd_enabled = 1;
+                                check_lyc();
+                                check_stat_irq(0);
                             }
                             reg[REG_LCDC] = value;
                             break;
@@ -965,14 +976,32 @@ int write(u16 addr, u8 value)
                             // STAT irq blocking / bug
                             // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
                             // call your STAT IRQ poll function, then set STAT enable flags to their true values.
-                            stat_bug = 1;
+                            
                             // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
                             // so it does not block if Mode 0 is enabled as well.
-                            reg[REG_STAT] = value;
+                            reg[REG_STAT] = value ;
+                            if (lcd_enabled) {
+                                if (!cgb_flag) stat_bug = 1;
+                                check_stat_irq(0);
+                            }
+                            break;
+                        case REG_SCX:
+                            if (value == 32) {
+                                //debug_show_tracelog = 1;
+                            }
+                            reg[REG_SCX] = value;
                             break;
                         case REG_LY: 
                             if (lcd_enabled) reg[REG_LY] = 0;
                             break; // read only
+                        case REG_LYC:
+                            reg[REG_LYC] = value;
+
+                            if (lcd_enabled) {
+                                check_lyc();
+                                check_stat_irq(0);
+                            }
+                            break;
                         case REG_DMA:
                             // DMA transfer - value specifies the transfer source address divided by $100
                             // Source:      $XX00-$XX9F   ;XX = $00 to $DF
@@ -2846,8 +2875,10 @@ u8 execute_instruction(u8 op) {
             // Set Carry flag if bit 8 changed due to addition
             F_C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
 
-            SP.full += t_s8;
+            //SP.full += t_s8;
+            SP.low = (t_int & 0xFFFF) & 0xFF;
             tick();
+            SP.high = ((t_int & 0xFFFF) >> 8) & 0xFF;
             tick();
             break;
         case 0xE9: // JP (HL)
@@ -2900,6 +2931,7 @@ u8 execute_instruction(u8 op) {
             A = read(MEM_IO + BC.low); tick();
             break;
         case 0xF3: // DI
+            if (ei_flag) ei_flag = 0;
             interrupts_enabled = 0;
             break;
         case 0xF4:
@@ -2948,7 +2980,7 @@ u8 execute_instruction(u8 op) {
             A = read(t_u16.full); tick();
             break;
         case 0xFB: // EI
-            interrupts_enabled = 1;
+            ei_flag = 1;
             break;
         case 0xFC:
             // nothing here
@@ -3057,7 +3089,7 @@ u8 do_interrupts() {
     return cycles;
 }
 
-int counter = 1;
+
 void cpu_update()
 {
     u8 op; // the current operand read from memory at PC location
@@ -3068,13 +3100,12 @@ void cpu_update()
     while (cycles_this_update < MAXDOTS)
     {
         u8 ly_start = reg[REG_LY];
-        u8 show_logs = 0;
-        if (show_logs) {
-            if (counter > 120000 && counter < 125000)
+        if (debug_show_tracelog) {
+            if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
             {
-                printf("%06d %06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X TIMA=%02X\n",
-                    counter, cycles_this_update, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], reg[REG_TIMA]);
+                printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X IDIV=%03d TIMA=%02X\n",
+                    counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
+                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], div_counter, reg[REG_TIMA]);
                 /*
                 printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
                     counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
@@ -3114,8 +3145,13 @@ void cpu_update()
             cycles = execute_instruction(op);
         }
         
-        //if (!GET_BIT(reg[REG_P1], 4)) printf("1");
+        // Interrupt handling
         cycles += do_interrupts();
+        // The effect of the EI instruction is delayed by one instruction
+        if (ei_flag) {
+            ei_flag = 0;
+            interrupts_enabled = 1;
+        }
 
         cycles_this_update += (cycles >> double_speed);
         
