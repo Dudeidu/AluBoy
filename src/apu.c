@@ -28,6 +28,9 @@ u8 ch1_env_vol_start;        // initial volume of envelope (0-F) (0=no Sound)
 u16 ch1_period_value;        // combination of NR13 + NR14(0-2)
 u8 ch1_len_enabled;          // 1=Stop output when length in NR11 expires
 
+// Forward declaration
+void turn_off();
+
 // PUBLIC   -------------------------------------------------
 
 u8 apu_read_register(u8 reg_id) {
@@ -185,7 +188,7 @@ apu_tick(u8 cycles) {
     Thus, the counter can be made to increase faster by writing to DIV while its relevant bit is set 
     (which clears DIV, and triggers the falling edge).
     */
-    div_apu_counter += 4;
+    //div_apu_counter += 4;
 
 }
 

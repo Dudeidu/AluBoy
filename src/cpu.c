@@ -22,6 +22,9 @@ extern void ppu_clear_screen();
 extern void check_stat_irq(u8 vblank_start);
 extern void check_lyc();
 
+extern u8 apu_read_register(u8 reg_id);
+extern int apu_write_register(u8 reg_id, u8 value);
+
 #define AUTOSAVE_INTERVAL 18000 // frame interval between automatic saves
 
 // Determines how many CPU cycles each instruction takes to perform
@@ -99,14 +102,14 @@ int autosave_counter;
 
 // Hardware timers
 u8  double_speed;
-u16 div_counter;    // every >256, DIV++
+u16 internal_counter; // the DIV register is the upper byte of this clock
 u8  timer_enabled;  // bit  2   of reg TAC
 u16 timer_speed;    // bits 0-1 of reg TAC
-u16 timer_counter;  // every >timer_speed, TIMA++
+u8  timer_clock_bit; // Picks a bit from the internal clock and uses it to increase TIMA when detects a falling edge (1 to 0)
 u8  tima_reload_delay = 0; // emulates a timer quirk: when the timer overflows, the TIMA register contains 00 for 4 cycles
 
 u8  halted;
-u8  ei_flag;        
+u8  ei_flag;
 u8  dma_transfer_flag; // whether a dma transfer is currently running
 u8  dma_access_flag; // allows bypassing the DMA memory blocking when its the DMA itself doing accessing the memory
 u8  dma_index;      // 0x00-0x9F
@@ -141,7 +144,7 @@ int cycles_this_update = 0;
 // Tests
 int emu_seconds = 0;
 int counter = 1;
-u8 debug_show_tracelog = 0;
+u8  debug_show_tracelog = 0;
 int debug_tracelog_interval = 1;
 int debug_tracelog_start = 0;
 
@@ -149,6 +152,7 @@ int debug_tracelog_start = 0;
 // Forward declarations
 void tick();
 void update_timers(u8 cycles);
+void tima_inc();
 u8 do_interrupts();
 void save();
 
@@ -386,16 +390,16 @@ int power_up()
     reg[REG_P1] = 0xCF;
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
-    reg[REG_DIV] = 0xAB;
-    div_counter = 205;
-    reg[REG_TIMA] = 0x00;
-    reg[REG_TMA] = 0x00;
-    reg[REG_TAC] = 0xF8;
-    timer_speed = 256;
-    timer_enabled = 0;
-    timer_counter = 205;
 
-    reg[REG_IF] = 0xE1;
+    internal_counter  = 0xABCC;
+    reg[REG_DIV]    = (internal_counter >> 8) & 0xFF;
+    reg[REG_TIMA]   = 0x00;
+    reg[REG_TMA]    = 0x00;
+    reg[REG_TAC]    = 0xF8;
+    timer_speed     = 256;
+    timer_enabled   = 0;
+
+    reg[REG_IF]     = 0xE1;
 
     reg[REG_NR10] = 0x80;
     reg[REG_NR11] = 0xBF;
@@ -717,8 +721,10 @@ int write(u16 addr, u8 value)
     // TODO - I/O register writing rules
     u8 msb = (u8)(addr >> 12);
 
-    if ((addr != (0xFF00 | REG_DMA)) && dma_transfer_flag && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
+    if ((addr != (0xFF00 | REG_DMA)) && dma_transfer_flag && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) {
+        tick();
         return -1;
+    }
 
     // MBC Registers
     if (msb < 0x8) {
@@ -900,7 +906,10 @@ int write(u16 addr, u8 value)
             case 0x8:
             case 0x9:
                 // VRAM
-                if (lcd_mode == LCD_MODE_VRAM) return -1;
+                if (lcd_mode == LCD_MODE_VRAM) {
+                    tick();
+                    return -1;
+                }
 
                 if (cgb_mode)   vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
                 else            vram[addr & 0x1FFF] = value;
@@ -908,7 +917,10 @@ int write(u16 addr, u8 value)
             case 0xA:
             case 0xB:
                 // ERAM
-                if (!eram_enabled) return -1;
+                if (!eram_enabled) {
+                    tick();
+                    return -1;
+                }
                 if (mbc == 2) {
                     // Half bytes, Bottom 9 bits of address are used to index RAM
                     eram[addr & 0x1FF] = (value & 0xF);
@@ -919,7 +931,10 @@ int write(u16 addr, u8 value)
                 }
                 else {
                     // "& 0x1FF" extracts the lower 13 bits, which maps the address to the array range starting from 0x0
-                    if (eram_bank >= eram_banks) return -1;
+                    if (eram_bank >= eram_banks) {
+                        tick();
+                        return -1;
+                    }
                     eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)] = value;
                 }
                 break;
@@ -937,11 +952,15 @@ int write(u16 addr, u8 value)
                 }
                 // Object attribute memory (OAM)
                 else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                    if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return -1;
+                    if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) {
+                        tick();
+                        return -1;
+                    }
 
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
                 }
                 else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
+                    tick();
                     return -1;
                 }
                 // I/O Registers
@@ -949,8 +968,11 @@ int write(u16 addr, u8 value)
                     u8 reg_id = addr & 0xFF;
 
                     // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
-                    if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
-                        return apu_write_register(reg_id, value);
+                    if (reg_id >= REG_NR10 && reg_id < REG_LCDC) {
+                        apu_write_register(reg_id, value);
+                        tick();
+                        return 0;
+                    }
 
                     // other registers
                     switch (reg_id) {
@@ -961,23 +983,10 @@ int write(u16 addr, u8 value)
                         case REG_DIV:
                             // emulates the internal div counter's bits changing 
                             // from high to low which in turn triggers a timer increment.
-                            if ((timer_speed == 1024 && reg[REG_DIV] > 1        ) || // bit 9
-                                (timer_speed == 16   && GET_BIT(div_counter, 3) ) || // bit 3
-                                (timer_speed == 64   && GET_BIT(div_counter, 5) ) || // bit 5
-                                (timer_speed == 256  && GET_BIT(div_counter, 7)))    // bit 7
-                            {
-                                u8 tima_old = reg[REG_TIMA];
-                                reg[REG_TIMA] = (tima_old + 1) & 0xFF;
-                                // if overflow occured
-                                if (reg[REG_TIMA] < tima_old) {
-                                    reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
-                                    tima_reload_delay = 4;
-                                    // Timer interrupt
-                                    SET_BIT(reg[REG_IF], INT_BIT_TIMER);
-                                }
+                            if (timer_enabled && GET_BIT(internal_counter, timer_clock_bit)) {
+                                tima_inc();
                             }
-                            div_counter = 0;
-                            timer_counter = 0;
+                            internal_counter = 0;
                             reg[REG_DIV] = 0;
                             break;
                         case REG_TIMA:
@@ -992,20 +1001,31 @@ int write(u16 addr, u8 value)
                             break;
                         case REG_TAC:
                             // bit 0–1: Select at which frequency TIMA increases
+                            // More accurately it picks a bit from the internal clock and uses it to increase TIMA when it falls from 1 to 0
                             switch (value & 0x3) {
-                                case 0: timer_speed = 1024; break;
-                                case 1: timer_speed = 16; break;
-                                case 2: timer_speed = 64; break;
-                                case 3: timer_speed = 256; break;
+                                case 0: timer_speed = 1024; timer_clock_bit = 9; break;
+                                case 1: timer_speed = 16;   timer_clock_bit = 3; break;
+                                case 2: timer_speed = 64;   timer_clock_bit = 5; break;
+                                case 3: timer_speed = 256;  timer_clock_bit = 7;  break;
                             }
                             // bit 2: Enable timer
+                            // When disabling the timer, if the corresponding bit in the system counter is set to 1, the falling edge
+                            // detector will see a change from 1 to 0, so TIMA will increase.
+                            
+                            if (timer_enabled && !GET_BIT(value, 2)) {
+                                if (GET_BIT(internal_counter, timer_clock_bit)) {
+                                    tima_inc();
+                                }
+                            }
                             timer_enabled = GET_BIT(value, 2);
+                            
                             reg[REG_TAC] = value;
                             break;
                         case REG_IF:
                             reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
                             break;
                         case 0x50: // BOOT register (read only)
+                            tick();
                             return -1;
                             break;
                         case REG_LCDC:
@@ -1073,7 +1093,10 @@ int write(u16 addr, u8 value)
                             ppu_update_palette(REG_OBP1, value);
                             break;
                         case REG_OBPD:
-                            if (lcd_mode == LCD_MODE_VRAM) return -1;
+                            if (lcd_mode == LCD_MODE_VRAM) {
+                                tick();
+                                return -1;
+                            }
                             reg[REG_OBPD] = value;
                             break;
                         default:
@@ -3057,15 +3080,12 @@ u8 execute_instruction(u8 op) {
 
 void update_timers(u8 cycles) {
     u8 clock = (cycles);
-
+    u8 timer_and_check_old = timer_enabled & GET_BIT(internal_counter, timer_clock_bit);
+    u8 timer_and_check_new;
 
     // DIV is incremented at 16384Hz / 32768Hz in double speed
-    div_counter += clock;
-    if (div_counter > 0xFF) {
-        div_counter &= 0xFF;
-
-        reg[REG_DIV] = (reg[REG_DIV] + 1) & 0xFF;
-    }
+    internal_counter = (internal_counter + clock) & 0xFFFF;
+    reg[REG_DIV] = (internal_counter >> 8) & 0xFF;
 
     // TIMA reload delay
     if (tima_reload_delay > 0) {
@@ -3079,26 +3099,24 @@ void update_timers(u8 cycles) {
         }
     }
 
-    // TIMA is incremented at the clock frequency specified by the TAC register
-    if (timer_enabled) {
-        u16 sp = (timer_speed);
+    timer_and_check_new = timer_enabled & GET_BIT(internal_counter, timer_clock_bit);
 
-        timer_counter += clock;
-        while (timer_counter >= sp) {
-            timer_counter -= sp;
-
-            u8 tima_old = reg[REG_TIMA];
-            reg[REG_TIMA] = (tima_old + 1) & 0xFF;
-            // if overflow occured
-            if (reg[REG_TIMA] < tima_old) {
-                reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
-
-                tima_reload_delay = 4;
-            }
-        }
+    // TIMA is incremented when detecting a falling edge from ANDing the enable bit in TAC with the bit of the system internal counter
+    if (timer_and_check_old && !timer_and_check_new) {
+        tima_inc();
     }
     //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
 
+}
+
+void tima_inc() {
+    u8 tima_old = reg[REG_TIMA];
+    reg[REG_TIMA] = (tima_old + 1) & 0xFF;
+    // if overflow occured
+    if (reg[REG_TIMA] < tima_old) {
+        reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
+        tima_reload_delay = 4;
+    }
 }
 
 u8 do_interrupts() {
@@ -3157,6 +3175,7 @@ void cpu_update()
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
 
+    cycles_this_update = 0;
     //printf("ly start: %d,", reg[REG_LY]);
     while (cycles_this_update < MAXDOTS)
     {
@@ -3166,7 +3185,7 @@ void cpu_update()
             {
                 printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X IDIV=%03d TIMA=%02X\n",
                     counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], div_counter, reg[REG_TIMA]);
+                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], internal_counter & 0xFF, reg[REG_TIMA]);
                 /*
                 printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
                     counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
@@ -3214,7 +3233,6 @@ void cpu_update()
         // vsync - end frame every full screen cycle
         if (lcd_enabled && ly_start != reg[REG_LY] && reg[REG_LY] == 0) break;
     }
-    cycles_this_update -= MAXDOTS;
 
     //printf("ly end: %d cycles: %d\n", reg[REG_LY], cycles_this_update);
     // Autosaving
