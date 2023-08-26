@@ -134,7 +134,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="include\emu_shared.h" />
+    <ClCompile Include="include\apu.h" />
     <ClCompile Include="src\application.c" />
+    <ClCompile Include="src\apu.c" />
+    <ClCompile Include="src\audio.c" />
     <ClCompile Include="src\cpu.c" />
     <ClCompile Include="src\input.c" />
     <ClCompile Include="src\ppu.c" />
@@ -143,6 +146,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\application.h" />
+    <ClInclude Include="include\audio.h" />
     <ClInclude Include="include\cpu.h" />
     <ClInclude Include="include\input.h" />
     <ClInclude Include="include\ppu.h" />

@@ -10,6 +10,7 @@
 #include <alu_io.h>
 
 #include "graphics.h"
+#include "audio.h"
 #include "cpu.h"
 #include "ppu.h"
 #include "input.h"
@@ -24,7 +25,7 @@ int         fps = 60;
 double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "donkey kong land";
+const char* rom_file_name = "pokemon red";
 const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
 
@@ -47,8 +48,8 @@ int application_init(const char* title) {
     u8*     rom_buffer  = NULL;
     int     num_keys;
 
-    // Initialize SDL Video
-    if (SDL_Init(SDL_INIT_VIDEO) < 0)
+    // Initialize SDL Video & Audio
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
     {
         fprintf(stderr, "%s\n", SDL_GetError());
         return -1;
@@ -64,6 +65,7 @@ int application_init(const char* title) {
     if (!window)
     {
         fprintf(stderr, "%s\n", SDL_GetError());
+        SDL_Quit();
         return -1;
     }
 
@@ -79,6 +81,27 @@ int application_init(const char* title) {
         return -1;
     }
 
+    // Initialize audio stuff
+    if (!audio_init()) {
+        audio_cleanup();
+        graphics_cleanup();
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
+    /////////////////////////////////////////////////////
+    // DEBUG audio test
+    
+    
+    audio_cleanup();
+    graphics_cleanup();
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return -1;
+
+    //////////////////////////////////////////////////////
+
     // Load ROM
     rom_path = combine_strings(path_arr, 3);
     if (rom_path != NULL) {
@@ -87,6 +110,7 @@ int application_init(const char* title) {
     }
     if (rom_buffer == NULL)
     {
+        audio_cleanup();
         graphics_cleanup();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -97,6 +121,7 @@ int application_init(const char* title) {
     // Initialize emulator cpu
     if (cpu_init(rom_buffer) == -1)
     {
+        audio_cleanup();
         graphics_cleanup();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -107,6 +132,7 @@ int application_init(const char* title) {
     if (ppu_init() == -1)
     {
         cpu_cleanup();
+        audio_cleanup();
         graphics_cleanup();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -222,6 +248,7 @@ void application_draw() {
 void application_cleanup() {
     cpu_cleanup();
     ppu_cleanup();
+    audio_cleanup();
     graphics_cleanup();
     if (window) SDL_DestroyWindow(window);
     SDL_Quit();

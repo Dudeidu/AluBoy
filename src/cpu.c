@@ -677,7 +677,14 @@ u8 read(u16 addr)
             }
             // I/O Registers
             else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                switch (addr & 0xFF) {
+                u8 reg_id = addr & 0xFF;
+                
+                // APU registers
+                if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
+                    return apu_read_register(reg_id);
+
+                // other registers
+                switch (reg_id) {
                     case REG_P1:
                         return reg[REG_P1];
                     case REG_SB:
@@ -690,7 +697,7 @@ u8 read(u16 addr)
                         if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
                         return reg[REG_OBPD];
                     default:
-                        return reg[addr - MEM_IO];   // Convert to range 0-255
+                        return reg[reg_id];   // Convert to range 0-255
                 }
             }
             // High RAM
@@ -939,7 +946,14 @@ int write(u16 addr, u8 value)
                 }
                 // I/O Registers
                 else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                    switch (addr & 0xFF) {
+                    u8 reg_id = addr & 0xFF;
+
+                    // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
+                    if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
+                        return apu_write_register(reg_id, value);
+
+                    // other registers
+                    switch (reg_id) {
                         case REG_P1:
                             // only change bits 4 and 5 (rest are read-only)
                             reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
@@ -1063,7 +1077,7 @@ int write(u16 addr, u8 value)
                             reg[REG_OBPD] = value;
                             break;
                         default:
-                            reg[addr & 0xFF] = value;   // Convert to range 0-255
+                            reg[reg_id] = value;   // Convert to range 0-255
                             break;
                     }
                     
@@ -1925,7 +1939,7 @@ u8 execute_cb(u8 op) {
 }
 
 void tick() {
-    u8 cycles = 4 >> double_speed;
+    u8 cycles = 4;
 
     // DMA transfer is running
     if (dma_transfer_flag) {
@@ -1943,8 +1957,9 @@ void tick() {
     }
 
     input_tick();
-    update_timers(cycles);
-    ppu_tick(double_speed ? (cycles >> 1) : cycles);
+    update_timers(cycles >> double_speed);
+    ppu_tick(cycles);
+    //apu_tick(cycles);
     
     if (stat_bug) stat_bug = 0;
 }
