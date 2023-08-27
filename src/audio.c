@@ -13,6 +13,8 @@ SDL_AudioSpec want, have;
 SDL_AudioDeviceID dev;
 
 int sample_counter = 0;
+unsigned short samples_gathered = 0;  // when we collect enough samples we output them to the audio device.
+u8* sample_buffer = NULL;
 
 // Forward declarations
 void audio_callback(void* userdata, u8* stream, int len);
@@ -30,9 +32,9 @@ int audio_init() {
     want.freq = 44100;
     want.format = AUDIO_U8;
     want.channels = 1;
-    want.samples = 1024;
-    want.callback = audio_callback;  // you wrote this function elsewhere.
-    want.userdata = &sample_counter; // counter, keeping track of current sample number
+    want.samples = 1028;
+    want.callback = NULL;  // audio_callback
+    //want.userdata = &sample_counter; // counter, keeping track of current sample number
     dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (dev == 0) {
         fprintf(stderr, "%s\n", SDL_GetError());
@@ -43,9 +45,40 @@ int audio_init() {
         return 0;
     }
 
-    beep(200);
+    sample_buffer = (u8*)malloc(sizeof(u8) * have.samples);
+
+    //beep(200);
+
+    SDL_PauseAudioDevice(dev, 0); // start playing sound
 
     return 1;
+}
+
+void audio_add_sample(u8 sample) {
+    
+    sample_buffer[samples_gathered++] = sample;
+
+    if (samples_gathered >= have.samples) {
+        int success;
+
+        // Delay execution and the let queue drain to about a frame's worth
+		
+        while ((SDL_GetQueuedAudioSize(dev)) > sizeof(u8) * have.samples) {
+			SDL_Delay(1);
+		}
+        
+		
+        success = SDL_QueueAudio(dev, sample_buffer, sizeof(u8) * samples_gathered);
+        if (success != 0) {
+            fprintf(stderr, "%s\n", SDL_GetError());
+        }
+        else {
+            //printf("output sample size: %d\n", samples_gathered);
+        }
+
+        //printf("queued audio: %d\n",SDL_GetQueuedAudioSize(dev));
+        samples_gathered = 0;
+    }
 }
 
 // Callback function
@@ -83,6 +116,6 @@ void beep(int duration) {
 
 
 void audio_cleanup() {
-    printf("sample counter: %d\n", sample_counter);
+    if (sample_buffer) free(sample_buffer);
     SDL_CloseAudioDevice(dev);
 }

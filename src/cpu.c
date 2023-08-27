@@ -22,8 +22,10 @@ extern void ppu_clear_screen();
 extern void check_stat_irq(u8 vblank_start);
 extern void check_lyc();
 
-extern u8 apu_read_register(u8 reg_id);
-extern int apu_write_register(u8 reg_id, u8 value);
+extern void apu_tick();
+extern void apu_frame_sequencer_update();
+extern u8   apu_read_register(u8 reg_id);
+extern int  apu_write_register(u8 reg_id, u8 value);
 
 #define AUTOSAVE_INTERVAL 18000 // frame interval between automatic saves
 
@@ -102,11 +104,12 @@ int autosave_counter;
 
 // Hardware timers
 u8  double_speed;
-u16 internal_counter; // the DIV register is the upper byte of this clock
-u8  timer_enabled;  // bit  2   of reg TAC
-u16 timer_speed;    // bits 0-1 of reg TAC
-u8  timer_clock_bit; // Picks a bit from the internal clock and uses it to increase TIMA when detects a falling edge (1 to 0)
+u16 internal_counter;   // the DIV register is the upper byte of this clock
+u8  timer_enabled;      // bit  2   of reg TAC
+u16 timer_speed;        // bits 0-1 of reg TAC
+u8  timer_clock_bit;    // Picks a bit from the internal clock and uses it to increase TIMA when detects a falling edge (1 to 0)
 u8  tima_reload_delay = 0; // emulates a timer quirk: when the timer overflows, the TIMA register contains 00 for 4 cycles
+
 
 u8  halted;
 u8  ei_flag;
@@ -397,7 +400,10 @@ int power_up()
     reg[REG_TMA]    = 0x00;
     reg[REG_TAC]    = 0xF8;
     timer_speed     = 256;
+    timer_clock_bit = 7;
     timer_enabled   = 0;
+
+    apu_clock_bit   = 12;
 
     reg[REG_IF]     = 0xE1;
 
@@ -986,6 +992,12 @@ int write(u16 addr, u8 value)
                             if (timer_enabled && GET_BIT(internal_counter, timer_clock_bit)) {
                                 tima_inc();
                             }
+                            // the DIV-APU counter can be made to increase faster by writing to DIV
+                            // while its relevant bit is set (which clears DIV, and triggers the falling edge).
+                            if (GET_BIT(internal_counter, apu_clock_bit)) {
+                                apu_frame_sequencer_update();
+                            }
+
                             internal_counter = 0;
                             reg[REG_DIV] = 0;
                             break;
@@ -1963,6 +1975,7 @@ u8 execute_cb(u8 op) {
 
 void tick() {
     u8 cycles = 4;
+    u16 clock_prev = internal_counter;
 
     // DMA transfer is running
     if (dma_transfer_flag) {
@@ -1982,7 +1995,15 @@ void tick() {
     input_tick();
     update_timers(cycles >> double_speed);
     ppu_tick(cycles);
-    //apu_tick(cycles);
+    
+    // “DIV-APU” counter / frame sequencer is increased every time DIV’s bit 4 (5 in double-speed mode) goes from 1 to 0, 
+    // TODO add support for double speed mode (changes apu_clock_bit to 13 instead of 12)
+    if (GET_BIT(clock_prev, apu_clock_bit) && !GET_BIT(internal_counter, apu_clock_bit)) {
+        apu_frame_sequencer_update();
+        //printf("clock prev: %02X, clock new: %02X\n", (clock_prev >> 8) & 0xFF, reg[REG_DIV]);
+    }
+    apu_tick();
+    //
     
     if (stat_bug) stat_bug = 0;
 }

@@ -56,6 +56,14 @@ const SDL_Color palette[] = {
 
 uint8_t* rgba_buffer = NULL;
 
+// Forward declaration
+int init_shaders(); 
+int init_geometry(); 
+int init_textures();
+int create_rgba_buffer();
+void graphics_draw(SDL_Window* window);
+
+
 
 int graphics_init(SDL_Window* window)
 {
@@ -269,5 +277,4 @@ void graphics_draw(SDL_Window* window)
 
     // Sends the render to SDL
     SDL_GL_SwapWindow(window);
-    return 0;
 }
