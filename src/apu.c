@@ -27,7 +27,6 @@ u16 ch1_freq_shadow;        // frequency shadow register
 
 u8 ch1_duty_cycle;          // defines which waveform is used. the ratio of the time spent low vs. high
 u8 ch1_sequence;            // the bit index in the current waveform
-
 u8 ch1_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
 u8 ch1_env_positive;        // envelope direction (0=decrease, 1=increase)
 u8 ch1_env_vol;             // initial volume of envelope (0-F) (0=no Sound)
@@ -36,7 +35,6 @@ u8 ch1_env_enabled;
 
 u8 ch2_duty_cycle;          // defines which waveform is used. the ratio of the time spent low vs. high
 u8 ch2_sequence;            // the bit index in the current waveform
-
 u8 ch2_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
 u8 ch2_env_positive;        // envelope direction (0=decrease, 1=increase)
 u8 ch2_env_vol;       // initial volume of envelope (0-F) (0=no Sound)
@@ -46,11 +44,26 @@ u8 ch2_env_enabled;
 u8 ch3_vol;
 u8 ch3_wave_position;
 
+u16 lfsr;
+u8 ch4_clock_div;
+u8 ch4_lfsr_width_mode;
+u8 ch4_clock_shift;
+
+u8 ch4_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
+u8 ch4_env_positive;        // envelope direction (0=decrease, 1=increase)
+u8 ch4_env_vol;       // initial volume of envelope (0-F) (0=no Sound)
+u8 ch4_env_sweep_counter;
+u8 ch4_env_enabled;
+
 const u8 sw_duty_cycle[4] = {   // square channel duty cycle waveforms
     0x1,    // 12.5%    00000001
     0x81,   // 25.0%    10000001
     0x87,   // 50.0%    10000111
     0x7E    // 75.0%    01111110
+};
+
+const u8 nw_divisors[8] = { // noise channel clock divider's divisor
+    8, 16, 32, 48, 64, 80, 96, 112
 };
 
 typedef struct Channel {
@@ -120,6 +133,15 @@ void apu_init() {
     apu_write_register(REG_NR32, reg[REG_NR32]);
     apu_write_register(REG_NR33, reg[REG_NR33]);
     apu_write_register(REG_NR34, reg[REG_NR34]);
+
+    ch4.dac_enabled = 1;
+    ch4.enabled     = 1;
+    ch4_env_sweep_counter = 0;
+    ch4_env_enabled  = 1;
+    apu_write_register(REG_NR41, reg[REG_NR41]);
+    apu_write_register(REG_NR42, reg[REG_NR42]);
+    apu_write_register(REG_NR43, reg[REG_NR43]);
+    apu_write_register(REG_NR44, reg[REG_NR44]);
     /*
     reg[REG_NR10] = 0x80;
     reg[REG_NR11] = 0xBF;
@@ -175,6 +197,12 @@ u8 apu_read_register(u8 reg_id) {
             return 0xFF; // write only
         case REG_NR34:
             return (reg[REG_NR34] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
+
+        // Wave Channel 4
+        case REG_NR41:
+            return 0xFF; // write only
+        case REG_NR44:
+            return (reg[REG_NR44] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
 
         default:
             return reg[reg_id];
@@ -411,6 +439,82 @@ int apu_write_register(u8 reg_id, u8 value) {
             }
             reg[reg_id] = value;
             break;
+        // Noise channel
+        case REG_NR41:
+            ch4.len_timer = value;
+
+            reg[reg_id] = value;
+            break;
+
+        case REG_NR42:
+            /*
+            Bit 7-4 - Initial volume of envelope (0-F) (0=No Sound)
+            Bit 3   - Envelope direction (0=Decrease, 1=Increase)
+            Bit 2-0 - Sweep pace (0=No Sweep)
+            */
+
+            // Setting bits 3-7 of this register all to 0 turns the DAC off, which also turns the channel off
+            ch4.dac_enabled = ((value & 0xF8) != 0);
+            if (!ch4.dac_enabled) ch4.enabled = 0; // channel can only turn off by the DAC, it can't turn it on
+            
+            // Writes to this register while the channel is on require retriggering it afterwards.
+            if (!ch4.enabled) {
+                ch4_env_sweep_pace = value & 0x7;
+                ch4_env_positive = GET_BIT(value, 3);
+                ch4_env_vol = (value >> 4) & 0xF;
+            }
+
+            reg[reg_id] = value;
+            break;
+
+        case REG_NR43:
+            /*
+            Bit 7-4 - Clock shift (s)
+            Bit 3   - LFSR width (0=15 bits, 1=7 bits)
+            Bit 2-0 - Clock divider (r)
+            */
+            ch4_clock_div = value & 7;
+            ch4_lfsr_width_mode = GET_BIT(value, 3);
+            ch4_clock_shift = (value >> 4) & 0xF;
+
+            reg[reg_id] = value;
+            break;
+
+        case REG_NR44:
+            /*
+            Bit 7   - Trigger (1=Restart channel)  (Write Only)
+            Bit 6   - Sound Length enable          (Read/Write) (1=Stop output when length in NR11 expires)
+            */
+            ch4.len_enabled = GET_BIT(value, 6);
+            // trigger the channel
+            if (GET_BIT(value, 7)) {
+                /*
+                * TODO
+                Noise channel's LFSR bits are all set to 1.
+                */
+
+                ch4.enabled = 1;
+
+                // if length counter is zero, it is set to 64 (256 for wave channel).
+                if (ch4.len_timer == 64) ch4.len_timer = 0;
+                ch4_env_enabled = 1;
+                // activate parameters that required re-triggering to take effect
+                ch4_env_sweep_pace  = reg[REG_NR42] & 0x7;
+                ch4_env_positive    = GET_BIT(reg[REG_NR42], 3);
+                ch4_env_vol   = (reg[REG_NR42] >> 4) & 0xF;
+                // the sweep timer is reloaded.
+                ch4_env_sweep_counter = (ch4_env_sweep_pace == 0) ? 8 : ch4_env_sweep_pace;
+
+                ch4.timer = nw_divisors[ch4_clock_div] << ch4_clock_shift;
+
+                // reset lfsr (15 bit)
+                lfsr = 0x7FFF;
+
+                if (!ch4.dac_enabled)
+                    ch4.enabled = 0;
+            }
+            reg[reg_id] = value;
+            break;
 
         // Global sound registers
         case REG_NR50:
@@ -594,21 +698,55 @@ void ch3_tick() {
     }
 }
 
+void ch4_tick() {
+    u8 cycles = 4;
+    u8 timer_prev = ch4.timer;
+
+    //if (!ch1.enabled) return;
+
+    ch4.timer -= cycles;
+    // timer underflow
+    if (ch4.timer <= timer_prev) {
+        u8 xor_val;
+        // The noise channel's frequency timer period is set by a base divisor shifted left some number of bits. 
+        ch4.timer = (nw_divisors[ch4_clock_div] << ch4_clock_shift);
+        //ch4_lfsr_width_mode
+        // generate a pseudo-random sequence
+        xor_val = GET_BIT(lfsr, 0) ^ GET_BIT(lfsr, 1);
+        lfsr >>= 1;
+        lfsr = (lfsr & 0x3FFF) | (xor_val << 14);
+        // If width mode is 1, the XOR result is ALSO put into bit 6 AFTER the shift, resulting in a 7-bit LFSR
+        if (ch4_lfsr_width_mode == 1) {
+            lfsr = (lfsr & 0xFFBF) | (xor_val << 6);
+        }
+        // fetch new output
+        if (ch4.enabled && !GET_BIT(lfsr, 0))
+            ch4.output = 128 + (u8)(10.0 * ((float)ch4_env_vol / 15.0));
+        else
+            ch4.output = 128;
+
+        //printf("%d,", ch2.output);
+    }
+}
+
+//ch4.timer = nw_divisors[ch4_clock_div] << ch4_clock_shift;
+
 void apu_tick() {
 
     ch1_tick();
     ch2_tick();
     ch3_tick();
-    
+    ch4_tick();
+
     sample_timer += 4;
     if (sample_timer >= sample_frequency) {
         u8 sample;
 
         sample_timer -= sample_frequency;
         // gather sample
-        sample = (u8)(((float)ch1.output * 0.33) + ((float)ch2.output * 0.33) + ((float)ch3.output * 0.33));
+        sample = (u8)(((float)ch1.output * 0.25) + ((float)ch2.output * 0.25) + ((float)ch3.output * 0.25) + ((float)ch4.output * 0.25));
         //sample = (u8)(((float)ch1.output * 0.5) + ((float)ch2.output * 0.5));
-        //sample = (u8)(ch3.output);
+        //sample = (u8)(ch4.output);
         //printf("%d,", ch1.output);
         audio_add_sample(sample);
     }
@@ -718,6 +856,31 @@ void update_envelope() {
                 ch2_env_enabled = 0;
         }
     }
+
+    if (ch4.enabled && ch4_env_sweep_counter > 0) {
+        ch4_env_sweep_counter--;
+        if (ch4_env_sweep_counter == 0) {
+            ch4_env_sweep_counter = ch4_env_sweep_pace;
+            
+            // The volume envelope and sweep timers treat a period of 0 as 8.
+            if (ch4_env_sweep_pace == 0)
+                ch4_env_sweep_counter = 8; 
+
+            if (ch4_env_enabled) {
+                if (ch4_env_positive && ch4_env_vol < 15) {
+                    ch4_env_vol++;
+                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
+                }
+                else if (!ch4_env_positive && ch4_env_vol > 0) {
+                    ch4_env_vol--;
+                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
+                }
+            }
+
+            if (ch4_env_vol == 0 || ch4_env_vol == 15)
+                ch4_env_enabled = 0;
+        }
+    }
 }
 
 void update_length() {
@@ -748,6 +911,14 @@ void update_length() {
         if (ch3.len_timer >= 256) {
             ch3.len_timer = 256;
             ch3.enabled = 0;
+        }
+    }
+
+    if (ch4.enabled && ch4.len_enabled) {
+        ch4.len_timer++;
+        if (ch4.len_timer >= 64) {
+            ch4.len_timer = 64;
+            ch4.enabled = 0;
         }
     }
 }
