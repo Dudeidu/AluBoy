@@ -295,7 +295,7 @@ int apu_write_register(u8 reg_id, u8 value) {
                 // activate parameters that required re-triggering to take effect
                 ch1_env_sweep_pace  = reg[REG_NR12] & 0x7;
                 ch1_env_positive    = GET_BIT(reg[REG_NR12], 3);
-                ch1_env_vol   = (reg[REG_NR12] >> 4) & 0xF;
+                ch1_env_vol         = (reg[REG_NR12] >> 4) & 0xF;
                 // the sweep timer is reloaded.
                 ch1_env_sweep_counter = (ch1_env_sweep_pace == 0) ? 8 : ch1_env_sweep_pace;
                 ch1_sweep_counter = (ch1_sweep_pace == 0) ? 8 : ch1_sweep_pace;
@@ -488,26 +488,20 @@ int apu_write_register(u8 reg_id, u8 value) {
             ch4.len_enabled = GET_BIT(value, 6);
             // trigger the channel
             if (GET_BIT(value, 7)) {
-                /*
-                * TODO
-                Noise channel's LFSR bits are all set to 1.
-                */
-
                 ch4.enabled = 1;
 
-                // if length counter is zero, it is set to 64 (256 for wave channel).
                 if (ch4.len_timer == 64) ch4.len_timer = 0;
                 ch4_env_enabled = 1;
                 // activate parameters that required re-triggering to take effect
                 ch4_env_sweep_pace  = reg[REG_NR42] & 0x7;
                 ch4_env_positive    = GET_BIT(reg[REG_NR42], 3);
-                ch4_env_vol   = (reg[REG_NR42] >> 4) & 0xF;
+                ch4_env_vol         = (reg[REG_NR42] >> 4) & 0xF;
                 // the sweep timer is reloaded.
                 ch4_env_sweep_counter = (ch4_env_sweep_pace == 0) ? 8 : ch4_env_sweep_pace;
 
                 ch4.timer = nw_divisors[ch4_clock_div] << ch4_clock_shift;
 
-                // reset lfsr (15 bit)
+                // noise channel's LFSR bits are all set to 1 (15 bit)
                 lfsr = 0x7FFF;
 
                 if (!ch4.dac_enabled)
@@ -622,7 +616,7 @@ void ch1_tick() {
         ch1_sequence = (u8)(ch1_sequence + 1) & 7;
         // fetch new output
         if (ch1.enabled && GET_BIT(sw_duty_cycle[ch1_duty_cycle], ch1_sequence))
-            ch1.output = 128 + (u8)(10.0 * ((float)ch1_env_vol / 15.0));
+            ch1.output = 128 + (u8)(15.0 * ((float)ch1_env_vol / 15.0));
         else
             ch1.output = 128;
 
@@ -644,7 +638,7 @@ void ch2_tick() {
         ch2_sequence = (u8)(ch2_sequence + 1) & 7;
         // fetch new output
         if (ch2.enabled && GET_BIT(sw_duty_cycle[ch2_duty_cycle], ch2_sequence))
-            ch2.output = 128 + (u8)(10.0 * ((float)ch2_env_vol / 15.0));
+            ch2.output = 128 + (u8)(15.0 * ((float)ch2_env_vol / 15.0));
         else
             ch2.output = 128;
 
@@ -687,7 +681,7 @@ void ch3_tick() {
                 case 2: volume = wave_val >> 1; break;
                 case 3: volume = wave_val >> 2; break;
             }
-            ch3.output = 128 + (u8)(10.0 * ((float)volume / 15.0));
+            ch3.output = 128 + (u8)(15.0 * ((float)volume / 15.0));
         }
         else
             ch3.output = 128;
@@ -710,7 +704,6 @@ void ch4_tick() {
         u8 xor_val;
         // The noise channel's frequency timer period is set by a base divisor shifted left some number of bits. 
         ch4.timer = (nw_divisors[ch4_clock_div] << ch4_clock_shift);
-        //ch4_lfsr_width_mode
         // generate a pseudo-random sequence
         xor_val = GET_BIT(lfsr, 0) ^ GET_BIT(lfsr, 1);
         lfsr >>= 1;
@@ -721,11 +714,11 @@ void ch4_tick() {
         }
         // fetch new output
         if (ch4.enabled && !GET_BIT(lfsr, 0))
-            ch4.output = 128 + (u8)(10.0 * ((float)ch4_env_vol / 15.0));
+            ch4.output = 128 + (u8)(15.0 * ((float)ch4_env_vol / 15.0));
         else
             ch4.output = 128;
 
-        //printf("%d,", ch2.output);
+        //printf("%d,", ch4.output);
     }
 }
 
@@ -739,14 +732,14 @@ void apu_tick() {
     ch4_tick();
 
     sample_timer += 4;
-    if (sample_timer >= sample_frequency) {
+    if (sample_timer >= sample_frequency * frameskip) {
         u8 sample;
 
-        sample_timer -= sample_frequency;
+        sample_timer -= sample_frequency * frameskip;
         // gather sample
         sample = (u8)(((float)ch1.output * 0.25) + ((float)ch2.output * 0.25) + ((float)ch3.output * 0.25) + ((float)ch4.output * 0.25));
         //sample = (u8)(((float)ch1.output * 0.5) + ((float)ch2.output * 0.5));
-        //sample = (u8)(ch4.output);
+        //sample = (u8)(ch1.output);
         //printf("%d,", ch1.output);
         audio_add_sample(sample);
     }
@@ -816,7 +809,7 @@ void update_envelope() {
             if (ch1_env_sweep_pace == 0)
                 ch1_env_sweep_counter = 8; 
 
-            if (ch1_env_enabled) {
+            if (ch1_env_enabled && ch1_env_sweep_pace > 0) {
                 if (ch1_env_positive && ch1_env_vol < 15) {
                     ch1_env_vol++;
                     reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch1_env_vol << 4);
@@ -841,14 +834,14 @@ void update_envelope() {
             if (ch2_env_sweep_pace == 0)
                 ch2_env_sweep_counter = 8; 
 
-            if (ch2_env_enabled) {
+            if (ch2_env_enabled && ch2_env_sweep_pace > 0) {
                 if (ch2_env_positive && ch2_env_vol < 15) {
                     ch2_env_vol++;
-                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch2_env_vol << 4);
+                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env_vol << 4);
                 }
                 else if (!ch2_env_positive && ch2_env_vol > 0) {
                     ch2_env_vol--;
-                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch2_env_vol << 4);
+                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env_vol << 4);
                 }
             }
 
@@ -866,7 +859,7 @@ void update_envelope() {
             if (ch4_env_sweep_pace == 0)
                 ch4_env_sweep_counter = 8; 
 
-            if (ch4_env_enabled) {
+            if (ch4_env_enabled && ch4_env_sweep_pace > 0) {
                 if (ch4_env_positive && ch4_env_vol < 15) {
                     ch4_env_vol++;
                     reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
@@ -875,6 +868,7 @@ void update_envelope() {
                     ch4_env_vol--;
                     reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
                 }
+                //printf("%d,", ch4_env_vol);
             }
 
             if (ch4_env_vol == 0 || ch4_env_vol == 15)
@@ -886,7 +880,7 @@ void update_envelope() {
 void update_length() {
     // if enabled - counts up to 64/256, then cuts off the channel
 
-    //printf("ch3:%d, len_enabled:%d, len:%d\n", ch3.enabled, ch3.len_enabled, ch3.len_timer);
+    //printf("ch4:%d, len_enabled:%d, len:%d\n", ch4.enabled, ch4.len_enabled, ch4.len_timer);
     if (ch1.enabled && ch1.len_enabled) {
         ch1.len_timer++;
         //reg[REG_NR11] = (reg[REG_NR11] & 0xC0) | ch1.len_timer; its write only so no need

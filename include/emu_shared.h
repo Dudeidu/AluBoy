@@ -205,6 +205,7 @@ extern u8   stat_bug;       // if true, all STAT flags are enabled for 1 cycle
 // PPU
 extern u8   lcd_mode;       // vblank/hblank/oam search/pixel rendering...
 extern u8   lcd_enabled;
+extern u8   frameskip;
 // INPUT
 extern u8   input_updated;   // whether the inputs were already fetched this frame
 // APU
