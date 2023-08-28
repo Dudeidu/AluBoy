@@ -62,12 +62,10 @@ void audio_add_sample(u8 sample) {
         int success;
 
         // Delay execution and the let queue drain to about a frame's worth
-		
         while ((SDL_GetQueuedAudioSize(dev)) > sizeof(u8) * have.samples) {
 			SDL_Delay(1);
 		}
         
-		
         success = SDL_QueueAudio(dev, sample_buffer, sizeof(u8) * samples_gathered);
         if (success != 0) {
             fprintf(stderr, "%s\n", SDL_GetError());
