@@ -18,9 +18,7 @@ typedef struct {
     u8 priority;
 } ObjectPriority;
 
-u8* sprite_buffer      = NULL;
-u8* background_buffer  = NULL;
-u8* window_buffer      = NULL;
+u8* lcd_buffer  = NULL;
 
 u8 redraw_flag;
 
@@ -30,12 +28,10 @@ u16 lcd_mode_next;    // determines when (scanline_counter) to switch lcd_mode
 ObjectPriority objects[40]; // array of object indexes that intersect with of the current scanline
 u8  object_count;     // how many objects to read from the array
 
-
 // Drawing optimization
 int vblank_counter  = 0;
-u8  frameskip       = 1; // only draw the screen when vblank_counter % frameskip == 0
+u8  frameskip       = 3; // only draw the screen when vblank_counter % frameskip == 0
 u16 tm_addr_prev    = 0;
-
 
 u8  pal_bgp[4]      = { 0, 1, 2, 3 };
 u8  pal_obp0[4]     = { 0, 1, 2, 3 };
@@ -65,37 +61,24 @@ int ppu_init()
 {
     // Allocate memory for the buffer and initialize with 0
     int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
-    sprite_buffer = (u8*)calloc(buffer_size, sizeof(u8));
-    if (sprite_buffer == NULL)
-    {
-        fprintf(stderr, "Failed to allocate memory for the pixel buffer!\n");
-        return -1;
-    }
-
-    background_buffer = (u8*)calloc(buffer_size, sizeof(u8));
-    if (background_buffer == NULL)
+    
+    lcd_buffer = (u8*)calloc(buffer_size, sizeof(u8));
+    if (lcd_buffer == NULL)
     {
         fprintf(stderr, "Failed to allocate memory for the background buffer!\n");
-        return -1;
-    }
-
-    window_buffer = (u8*)calloc(buffer_size, sizeof(u8));
-    if (window_buffer == NULL)
-    {
-        fprintf(stderr, "Failed to allocate memory for the window buffer!\n");
-        return -1;
+        return 0;
     }
 
     lcd_mode_next = SCANLINE_DOTS;
 
     redraw_flag = 1;
-    return 0;
+    return 1;
 }
 
 // Used for passing the pixel buffer to GL
 u8* ppu_get_pixel_buffer()
 {
-    return background_buffer;
+    return lcd_buffer;
 }
 
 // assigns gray shades to the color indexes
@@ -139,7 +122,7 @@ void ppu_clear_screen() {
     lcd_mode = LCD_MODE_HBLANK;
     lcd_mode_next = SCANLINE_DOTS;
 
-    memset(background_buffer, MEM_ROM_0, buffer_size);
+    memset(lcd_buffer, MEM_ROM_0, buffer_size);
 }
 
 // Whether the screen needs to be redrawn
@@ -151,10 +134,9 @@ void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
 }
 
-void ppu_tick(u8 cycles)
+void ppu_tick()
 {
-    u8 clock = cycles;
-    u8 new_frame = 0;
+    u8 clock = M_CYCLE;
 
     if (!lcd_enabled) return;
 
@@ -258,9 +240,9 @@ void ppu_tick(u8 cycles)
 
 void ppu_cleanup()
 {
-    if (sprite_buffer)      free(sprite_buffer);
-    if (background_buffer)  free(background_buffer);
-    if (window_buffer)      free(window_buffer);
+    if (lcd_buffer) {
+        free(lcd_buffer);
+    }
 }
 
 // PRIVATE --------------------------------------------------
@@ -345,7 +327,7 @@ void draw_scanline(u8 y) {
     }
     else {
         // draw white color
-        //memset(&background_buffer[y * SCREEN_WIDTH], 0, SCREEN_WIDTH);
+        //memset(&lcd_buffer[y * SCREEN_WIDTH], 0, SCREEN_WIDTH);
         //redraw_flag = 1;
     }
     if (GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE)) {
@@ -468,8 +450,8 @@ void draw_tiles(u8 y) {
 
         // Update pixel color
         pixel_pos = x + y_screen_width;
-        if (background_buffer[pixel_pos] != pal_bgp[color_index]) {
-            background_buffer[pixel_pos] = pal_bgp[color_index];
+        if (lcd_buffer[pixel_pos] != pal_bgp[color_index]) {
+            lcd_buffer[pixel_pos] = pal_bgp[color_index];
             // Tell screen to redraw at the next step
             if (!redraw_flag) redraw_flag = 1;
 
@@ -548,10 +530,10 @@ void draw_objects(u8 y) {
             pixel_pos = px + y_screen_width;
 
             // BG and Window colors 1-3 over the OBJ
-            if (bg_over_obj && background_buffer[pixel_pos] != 0) continue;
+            if (bg_over_obj && lcd_buffer[pixel_pos] != 0) continue;
 
-            if (background_buffer[pixel_pos] != palette[color_index]) {
-                background_buffer[pixel_pos] = palette[color_index];
+            if (lcd_buffer[pixel_pos] != palette[color_index]) {
+                lcd_buffer[pixel_pos] = palette[color_index];
                 // Tell screen to redraw at the next step
                 if (!redraw_flag) redraw_flag = 1;
             }

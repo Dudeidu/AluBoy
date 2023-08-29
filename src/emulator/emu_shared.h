@@ -190,10 +190,13 @@ enum OAMFlag {
 
 static const int MAXDOTS = 70224; // 154 scanlines per frame, 456 dots per scanline = 70224 (59.7275 FPS)
 static const int SCANLINE_DOTS = 456; // dots per scanline
+static const int M_CYCLE = 4;
 
 // Declare shared memory
 extern const char* rom_file_name;
 extern const char* rom_file_path;
+
+extern u8   cgb_mode;
 
 extern u8   reg[0x100];     // Refers to Register enum
 extern u8   vram[2 * BANKSIZE_VRAM];

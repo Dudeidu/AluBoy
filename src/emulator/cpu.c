@@ -1,6 +1,4 @@
-/// <summary>
 /// Emulates the Game Boy's DMG/CGB-CPU 
-/// </summary>
 
 #include "cpu.h"
 
@@ -9,25 +7,22 @@
 #include <string.h>
 
 #include "alu_binary.h"
-#include "alu_io.h"
-#include "emu_shared.h"
 #include "macros.h"
 
-// external functions
-extern void input_tick();
+#include "emu_shared.h"
+#include "gb.h"
+#include "mmu.h"
+#include "timer.h"
 
-extern void ppu_tick(u8 cycles);
+// external functions
+
 extern void ppu_update_palette(u8 reg, u8 value);
 extern void ppu_clear_screen();
 extern void check_stat_irq(u8 vblank_start);
 extern void check_lyc();
 
-extern void apu_tick();
 extern void apu_frame_sequencer_update();
-extern u8   apu_read_register(u8 reg_id);
-extern int  apu_write_register(u8 reg_id, u8 value);
 
-#define AUTOSAVE_INTERVAL 18000 // frame interval between automatic saves
 
 // Determines how many CPU cycles each instruction takes to perform
 u8 op_cycles_lut[]  = {
@@ -48,27 +43,6 @@ u8 op_cycles_lut[]  = {
     12,12, 8, 0, 0,16, 8,16,16, 4,16, 0, 0, 0, 8,16,
     12,12, 8, 4, 0,16, 8,16,12, 8,16, 4, 0, 0, 8,16
 };
-// DMG boot rom
-/*
-u8 boot_rom[] = { 
-    0x31, 0xFE, 0xFF, 0xAF, 0x21, 0xFF, 0x9F, 0x32, 0xCB, 0x7C, 0x20, 0xFB, 0x21, 0x26, 0xFF, 0x0E,
-    0x11, 0x3E, 0x80, 0x32, 0xE2, 0x0C, 0x3E, 0xF3, 0xE2, 0x32, 0x3E, 0x77, 0x77, 0x3E, 0xFC, 0xE0,
-    0x47, 0x11, 0x04, 0x01, 0x21, 0x10, 0x80, 0x1A, 0xCD, 0x95, 0x00, 0xCD, 0x96, 0x00, 0x13, 0x7B,
-    0xFE, 0x34, 0x20, 0xF3, 0x11, 0xD8, 0x00, 0x06, 0x08, 0x1A, 0x13, 0x22, 0x23, 0x05, 0x20, 0xF9,
-    0x3E, 0x19, 0xEA, 0x10, 0x99, 0x21, 0x2F, 0x99, 0x0E, 0x0C, 0x3D, 0x28, 0x08, 0x32, 0x0D, 0x20,
-    0xF9, 0x2E, 0x0F, 0x18, 0xF3, 0x67, 0x3E, 0x64, 0x57, 0xE0, 0x42, 0x3E, 0x91, 0xE0, 0x40, 0x04,
-    0x1E, 0x02, 0x0E, 0x0C, 0xF0, 0x44, 0xFE, 0x90, 0x20, 0xFA, 0x0D, 0x20, 0xF7, 0x1D, 0x20, 0xF2,
-    0x0E, 0x13, 0x24, 0x7C, 0x1E, 0x83, 0xFE, 0x62, 0x28, 0x06, 0x1E, 0xC1, 0xFE, 0x64, 0x20, 0x06,
-    0x7B, 0xE2, 0x0C, 0x3E, 0x87, 0xE2, 0xF0, 0x42, 0x90, 0xE0, 0x42, 0x15, 0x20, 0xD2, 0x05, 0x20,
-    0x4F, 0x16, 0x20, 0x18, 0xCB, 0x4F, 0x06, 0x04, 0xC5, 0xCB, 0x11, 0x17, 0xC1, 0xCB, 0x11, 0x17,
-    0x05, 0x20, 0xF5, 0x22, 0x23, 0x22, 0x23, 0xC9, 0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
-    0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
-    0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
-    0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E, 0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C,
-    0x21, 0x04, 0x01, 0x11, 0xA8, 0x00, 0x1A, 0x13, 0xBE, 0x20, 0xFE, 0x23, 0x7D, 0xFE, 0x34, 0x20,
-    0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50
-};
-*/
 
 // Define shared memory
 u8  reg[0x100];     // Refers to Register enum
@@ -89,63 +63,13 @@ BytePair SP;        // Stack Pointer
 u16 PC;             // Program Counter/Pointer
 
 // CPU specific memory
-u8* rom  = NULL;    // loaded from .gb / .gbc
-u8* eram = NULL;    // external ram (cartridge)
 u8  wram[8 * BANKSIZE_ROM];
-u8  rtc[0xD];       // Refers to RTCRegister enum
 u8  hram[0x80];
-u16 rom_banks;      // up to 512 banks of 16 KB each (8MB)
-u8  eram_banks;     // up to 16 banks of 8 KB each (128 KB)
-
-u8 cgb_mode = 0;
-u8 has_battery;     // whether to import/export the external ram to a file (.sav)
-u8 save_enabled = 0; // if true, save at the end of this frame
-int autosave_counter;
-
-// Hardware timers
-u8  double_speed;
-u16 internal_counter;   // the DIV register is the upper byte of this clock
-u8  timer_enabled;      // bit  2   of reg TAC
-u16 timer_speed;        // bits 0-1 of reg TAC
-u8  timer_clock_bit;    // Picks a bit from the internal clock and uses it to increase TIMA when detects a falling edge (1 to 0)
-u8  tima_reload_delay = 0; // emulates a timer quirk: when the timer overflows, the TIMA register contains 00 for 4 cycles
-
 
 u8  halted;
 u8  ei_flag;
-u8  dma_transfer_flag; // whether a dma transfer is currently running
-u8  dma_access_flag; // allows bypassing the DMA memory blocking when its the DMA itself doing accessing the memory
-u8  dma_index;      // 0x00-0x9F
-
-// Header information
-unsigned char title[17]; // 16 + '\0'
-unsigned char licensee_code_new[2];
-u8  licensee_code_old;
-u8  destination_code;
-u8  cgb_flag;
-u8  sgb_flag;
-u8  cart_type;
-u8  rom_version;
-u8  checksum_header;
-u16 checksum_global;
-u8  rom_size_code;
-u8  eram_size_code;
-u8  mbc;            // 0: ROM only | 1: MBC1 | 2: MBC2 | 3: MBC3 | 4: MMM01 | 5: MBC5 
-
-// MBC Registers
-u16 rom_bank;       // current bank
-u8  rom_bank_2;     // secondary ROM banking register
-u8  eram_bank;
-u8  eram_enabled;   // RAM/RTC Enable mbc register
-u8  mbc_mode;       // For mbc1 only - 0: 2MiB ROM/8KiB RAM | 1: 512KiB ROM/4*8Kib RAM
-u8  rtc_latch_flag;
-u8  rtc_latch_reg;
-u8  rtc_select_reg; // Indicated which RTC register is currently mapped into memory at A000 - BFFF
-
-int cycles_this_update = 0;
 
 // Tests
-int emu_seconds = 0;
 int counter = 1;
 u8  debug_show_tracelog = 0;
 int debug_tracelog_interval = 1;
@@ -153,11 +77,9 @@ int debug_tracelog_start = 0;
 
 
 // Forward declarations
-void tick();
-void update_timers(u8 cycles);
-void tima_inc();
 u8 do_interrupts();
-void save();
+u8 execute_instruction(u8 op);
+u8 execute_cb(u8 op);
 
 // Arithmetic
 void inc_u8(u8* a) {
@@ -331,33 +253,11 @@ void test_bit(u8* a, u8 b) {
     F_H = 1;
 }
 
-// Misc
-u8 interrupt_is_pending() {
-    return (((reg[REG_IE] & 0x1F) & (reg[REG_IF] & 0x1F)) != 0);
-}
-
-// Dump ERAM to [.sav] file
-void save() {
-    if (!has_battery) return;
-
-    const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
-    char* save_path = combine_strings(path_arr, 3);
-    if (save_path != NULL) {
-        size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
-        int success;
-        success = SaveBuffer(save_path, eram, buffer_size);
-        if (success) {
-            printf("save written to disk.\n");
-        }
-        else {
-            printf("could not write save to disk.\n");
-        }
-        free(save_path);
-    }
-}
 
 int power_up()
 {
+    // TODO - move the power-up function to gb and have each component handle its own power-up routine
+    
     // Reset registers to their default values (DMG)
     A = 0x01;
     F_Z = 1;
@@ -382,11 +282,6 @@ int power_up()
     ei_flag = 0;
     halted = 0;
 
-    mbc_mode = 0;
-    rom_bank = 1;
-    rom_bank_2 = 0;
-    eram_enabled = 0;
-
     for (int i = 0; i <= 0xFF; i++) {
         reg[i] = 0xFF;
     }
@@ -394,14 +289,7 @@ int power_up()
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
 
-    internal_counter  = 0xABCC;
-    reg[REG_DIV]    = (internal_counter >> 8) & 0xFF;
-    reg[REG_TIMA]   = 0x00;
-    reg[REG_TMA]    = 0x00;
-    reg[REG_TAC]    = 0xF8;
-    timer_speed     = 256;
-    timer_clock_bit = 7;
-    timer_enabled   = 0;
+    timer_init();
 
     apu_clock_bit   = 12;
 
@@ -470,171 +358,115 @@ int power_up()
     reg[REG_IE] = 0x00;
     return 0;
 }
-
-int cpu_init(u8* rom_buffer)
+int cpu_init()
 {
-    // Lookup tables for cart type
-    u8 mbc_lut[] = {
-        0, 1, 1, 1, 0, 2, 2, 0, 0, 0, 0, 4, 4, 4, 0, 3,
-        3, 3, 3, 3, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5
-    };
-    u8 mbc_lut_size = 31;
-
-    rom = rom_buffer;
-
-    // Load boot ROM
-    //memcpy(rom, boot_rom, 0x100);
-
-    // Get ROM header data
-
-    // Title
-    memcpy(title, &rom[ROM_TITLE], sizeof(unsigned char) * 16);
-    title[16] = '\0'; // adds a string terminator
-    printf("Title: %s\n", title);
-
-    // CGB Indicator
-    cgb_flag = rom[ROM_CGB_FLAG] == 0x80;
-    cgb_mode = 0;
-    printf("CGB: %s\n", cgb_flag ? "true" : "false");
-
-    // SGB Indicator
-    sgb_flag = rom[ROM_SGB_FLAG] == 0x03;
-    printf("SGB: %s\n", sgb_flag ? "true" : "false");
-
-    // Cart type
-    cart_type = rom[ROM_CART_TYPE];
-    
-    switch (cart_type) {
-        case 0x03: case 0x06: case 0x09: case 0x0D: case 0x0F: 
-        case 0x10: case 0x13: case 0x1B: case 0x1E: case 0x22: case 0xFF:
-            has_battery = 1;
-            break;
-        default:
-            has_battery = 0;
-            break;
-    }
-
-    // MBC type
-    mbc = (cart_type < mbc_lut_size) ? mbc = mbc_lut[cart_type] : 0;
-
-    // ROM/ERAM banks
-    rom_size_code = rom[ROM_ROM_SIZE];
-    eram_size_code = rom[ROM_RAM_SIZE];
-
-    switch (rom_size_code) {
-        case 0x0:   rom_banks = 2;   break; // 32  kB
-        case 0x1:   rom_banks = 4;   break; // 64  kB
-        case 0x2:   rom_banks = 8;   break; // 128 kB
-        case 0x3:   rom_banks = 16;  break; // 256 kB
-        case 0x4:   rom_banks = 32;  break; // 512 kB
-        case 0x5:   rom_banks = 64;  break; // 1   MB
-        case 0x6:   rom_banks = 128; break; // 2   MB
-        case 0x7:   rom_banks = 256; break; // 4   MB
-        case 0x8:   rom_banks = 512; break; // 8   MB
-        case 0x52:  rom_banks = 72;  break; // 1.1 MB
-        case 0x53:  rom_banks = 80;  break; // 1.2 MB
-        case 0x54:  rom_banks = 96;  break; // 1.5 MB
-        default:    rom_banks = 2;   break;
-    }
-    switch (eram_size_code) {
-        case 0x0:   eram_banks = 0;  break; // none
-        case 0x1:   eram_banks = 1;  break; // 2   kB
-        case 0x2:   eram_banks = 1;  break; // 8   kB
-        case 0x3:   eram_banks = 4;  break; // 32  kB
-        case 0x4:   eram_banks = 16; break; // 128 kB
-        default:    eram_banks = 0;  break;
-    }
-
-    // TODO - load save file if exists
-    if (eram != NULL) {
-        free(eram);
-        eram = NULL;
-    }
-    if (eram_banks > 0) {
-        size_t buffer_size = sizeof(u8) * eram_banks * BANKSIZE_ERAM;
-        eram = (u8*)malloc(buffer_size);
-    }
-    else {
-        // MBC2 has built in ram (512x4 bits)
-        eram = (mbc == 2) ? (u8*)malloc(512) : NULL;
-    }
-
-    // load save file if exists
-    if (has_battery) {
-        size_t buffer_size = (mbc == 2) ? 512 : sizeof(u8) * eram_banks * BANKSIZE_ERAM;
-
-        // Load save
-        const char* path_arr[] = { rom_file_path, rom_file_name, ".sav"};
-        char* save_path = combine_strings(path_arr, 3);
-        char* save_buffer = NULL;
-        if (save_path != NULL) {
-            save_buffer = LoadBuffer(save_path);
-            free(save_path);
-        }
-        else {
-            printf("no save data found.\n");
-        }
-        if (save_buffer != NULL && eram != NULL)
-        {
-            memcpy(eram, save_buffer, buffer_size);
-            free(save_buffer);
-
-            printf("save loaded from disk.\n");
-        }
-
-        autosave_counter = 0;
-        save_enabled = 1;
-    }
-    else {
-        save_enabled = 0;
-    }
-
-    // Licensee code
-    memcpy(licensee_code_new, &rom[ROM_LICENSEE_NEW], sizeof(unsigned char) * 2); // Stored as 2 char ascii
-    printf("Licensee new: %c%c\n", licensee_code_new[0], licensee_code_new[1]);
-    licensee_code_old = rom[ROM_LICENSEE_OLD];
-    printf("Licensee old: %02X\n", licensee_code_old);
-    
-    // Misc
-    destination_code    = rom[ROM_DESTINATION];
-    rom_version         = rom[ROM_VERSION];
-    checksum_header     = rom[ROM_HEADER_CHECKSUM];
-    checksum_global     = rom[ROM_GLOBAL_CHECKSUM] << 8 || rom[ROM_GLOBAL_CHECKSUM + 1];
-
-    printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n", cart_type, mbc, rom_banks, eram_banks);
-
     power_up();
 
-    return 0;
+    return 1;
 }
 
-u8 read(u16 addr)
-{
-    // TODO - I/O register reading rules
 
+u8 cpu_read_register(u8 reg_id) {
+    // handles special cases
+    switch (reg_id) {
+        case REG_P1:
+            return reg[REG_P1];
+        case REG_SB:
+            return 0xFF;
+
+        // TODO move this to PPU
+        case REG_OBPD:
+            if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+            return reg[REG_OBPD];
+
+        default:
+            return reg[reg_id];
+    }
+}
+void cpu_write_register(u8 reg_id, u8 value) {
+    // handles special cases
+    switch (reg_id) {
+        case REG_P1:
+            // only change bits 4 and 5 (rest are read-only)
+            reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
+            break;
+        case REG_IF:
+            reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
+            break;
+        case 0x50: // BOOT register (read only)
+            break;
+
+        // TODO move these to PPU    
+        case REG_LCDC:
+            if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
+                printf("illegal LCD disable\n");
+            }
+            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
+            {
+                ppu_clear_screen();
+                lcd_enabled = 0;
+            }
+            else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
+                //printf("lcd enabled\n");
+                lcd_enabled = 1;
+                check_lyc();
+                check_stat_irq(0);
+            }
+            reg[REG_LCDC] = value;
+            break;
+        case REG_STAT:
+            // STAT irq blocking / bug
+            // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
+            // call your STAT IRQ poll function, then set STAT enable flags to their true values.
+                            
+            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
+            // so it does not block if Mode 0 is enabled as well.
+            reg[REG_STAT] = value ;
+            if (lcd_enabled) {
+                if (!cgb_mode) stat_bug = 1;
+                check_stat_irq(0);
+            }
+            break;
+        case REG_SCX:
+            if (value == 32) {
+                //debug_show_tracelog = 1;
+            }
+            reg[REG_SCX] = value;
+            break;
+        case REG_LY: 
+            if (lcd_enabled) reg[REG_LY] = 0;
+            break; // read only
+        case REG_LYC:
+            reg[REG_LYC] = value;
+
+            if (lcd_enabled) {
+                check_lyc();
+                check_stat_irq(0);
+            }
+            break;
+        case REG_BGP:
+            ppu_update_palette(REG_BGP, value);
+            break;
+        case REG_OBP0:
+            ppu_update_palette(REG_OBP0, value);
+            break;
+        case REG_OBP1:
+            ppu_update_palette(REG_OBP1, value);
+            break;
+        case REG_OBPD:
+            if (lcd_mode != LCD_MODE_VRAM) {
+                reg[REG_OBPD] = value;
+            }
+            break;
+        default:
+            reg[reg_id] = value;   // Convert to range 0-255
+            break;
+    }
+}
+u8 cpu_read_memory(u16 addr) {
     u8 msb = (u8)(addr >> 12);
 
-    if (dma_transfer_flag && (addr != (0xFF00 | REG_DMA)) && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
-        return 0xFF;
-
     switch (msb) {
-        case 0x0:
-        case 0x1:
-        case 0x2:
-        case 0x3:
-            // In MBC1 mode-1: ROM bank X0
-            if (mbc == 1 && mbc_mode == 1) {
-                return rom[addr + ((rom_bank_2 << 5) % rom_banks) * BANKSIZE_ROM];
-            }
-            // ROM bank 0
-            else {
-                return rom[addr];
-            }
-        case 0x4:
-        case 0x5:
-        case 0x6:
-        case 0x7:
-            return rom[(addr - MEM_ROM_N) + (rom_bank * BANKSIZE_ROM)];
         case 0x8:
         case 0x9:
             // VRAM
@@ -642,23 +474,6 @@ u8 read(u16 addr)
 
             if (cgb_mode)   return vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
             else            return vram[addr & 0x1FFF];
-            break;
-        case 0xA:
-        case 0xB:
-            // RAM bank 00-03, if any
-            if (!eram_enabled) return 0xFF;
-            if (mbc == 2) {
-                // Half bytes, Bottom 9 bits of address are used to index RAM
-                return (eram[addr & 0x1FF] | 0xF0); // reads first nibble, second nibble is all set
-            }
-            else if (mbc == 3 && rtc_select_reg > 0) {
-                // RTC register read
-                return rtc[rtc_select_reg];
-            }
-            else {
-                if (eram_bank >= eram_banks) return 0xFF;
-                return eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)];
-            }
         case 0xC:
         case 0xE:
             // WRAM / ECHO RAM
@@ -685,31 +500,6 @@ u8 read(u16 addr)
                 }
                 return 0x00;
             }
-            // I/O Registers
-            else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                u8 reg_id = addr & 0xFF;
-                
-                // APU registers
-                if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
-                    return apu_read_register(reg_id);
-
-                // other registers
-                switch (reg_id) {
-                    case REG_P1:
-                        return reg[REG_P1];
-                    case REG_SB:
-                        return 0xFF;
-                    case REG_DIV:
-                        return reg[REG_DIV];
-                    case REG_TIMA:
-                        return (tima_reload_delay > 0) ? 0x00 : reg[REG_TIMA];
-                    case REG_OBPD:
-                        if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
-                        return reg[REG_OBPD];
-                    default:
-                        return reg[reg_id];   // Convert to range 0-255
-                }
-            }
             // High RAM
             else if (addr >= MEM_HRAM && addr < MEM_IE) {
                 return hram[addr - MEM_HRAM];  // Convert to range 0-127
@@ -721,415 +511,142 @@ u8 read(u16 addr)
     }
     return 0xFF;
 }
-
-int write(u16 addr, u8 value)
-{
+void cpu_write_memory(u16 addr, u8 value) {
     // TODO - I/O register writing rules
     u8 msb = (u8)(addr >> 12);
 
-    if ((addr != (0xFF00 | REG_DMA)) && dma_transfer_flag && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) {
-        tick();
-        return -1;
-    }
-
-    // MBC Registers
-    if (msb < 0x8) {
-        switch (mbc) {
-            case 1:
-            {
-                switch (msb) {
-                    case 0x0:
-                    case 0x1:
-                        // 4 bit register - RAM Enabled
-                        eram_enabled = ((value & 0xF) == 0xA);
-                        break;
-                    case 0x2:
-                    case 0x3:
-                    {
-                        // 5 bit register - ROM bank number
-                        u8 rb = (value & 0x1F);
-                        if (rb == 0) rb = 1;
-                        //printf("bank change value: %02X,", rb);
-                        if (rb < rom_banks) {
-                            rom_bank = (rom_bank & ~0x1F) | rb; // only change the lower 5 bits
-                        }
-                        else {
-                            // Mask the number to the max banks
-                            rom_bank = (rom_bank & ~0x1F) | (rb & (rom_banks-1));
-
-                        }
-                        //printf("new rom bank: %02X\n", rom_bank);
-                    } break;
-                    case 0x4:
-                    case 0x5:
-                    {
-                        // 2 bit register - RAM bank number / Upper bits of ROM bank number
-                        rom_bank_2 = (value & 0x3);
-                        rom_bank = (rom_bank & 0x1F) | (rom_bank_2 << 5);
-
-                        // Mask the number to the max banks
-                            rom_bank = (rom_bank & (rom_banks-1));
-
-                        if (mbc_mode == 1) {
-                            eram_bank = (value & 0x3);
-                        }
-                        
-                        // In MMM01 this 2-bit register is instead applied to bits 4-5 
-                        // of the ROM bank number and the top bit of the main 5-bit main ROM banking register is ignored
-                    } break;
-                    case 0x6:
-                    case 0x7:
-                    {
-                        // 1 bit register - Banking mode select
-                        // 00 = Simple Banking Mode (default) 
-                        // 01 = RAM Banking Mode / Advanced ROM Banking Mode
-                        mbc_mode = (value & 1);
-                        if (mbc_mode == 0) {
-                            //eram_bank = 0;
-                            rom_bank = rom_bank & 0x1F; // remove rom_bank_2
-                        }
-                        else {
-                            u8 i = 0;
-                        }
-
-                    } break;
-                }
-            } break;
-            case 2:
-            {
-                switch (msb) {
-                    case 0x0:
-                    case 0x1:
-                    case 0x2:
-                    case 0x3:
-                    {
-                        // RAM enable  / ROM bank number
-                        if ((addr & 0x100) == 0) { // bit 8 is 0
-                            eram_enabled = ((value & 0xF) == 0xA);
-                        }
-                        else {
-                            //printf("rom bank value: %d,", value);
-                            rom_bank = (value & 0xF);
-                            if (rom_bank == 0) rom_bank = 1;
-
-                            rom_bank = rom_bank & (rom_banks - 1);
-                            //printf("new value: %d\n", rom_bank);
-                        }
-                    } break;
-                }
-            } break;
-            case 3:
-            {
-                switch ((u8)(addr >> 12)) {
-                    case 0x0:
-                    case 0x1:
-                    {
-                        // RAM and Timer enable
-                        eram_enabled = ((value & 0xF) == 0xA);
-                    } break;
-                    case 0x2:
-                    case 0x3:
-                    {
-                        // 7 bit register - ROM bank number
-                        u8 rb = (value & 0x7F);
-                        if (rb < rom_banks) {
-                            rom_bank = (rb == 0) ? 1 : rb; // 0 behaves as 1
-                        }
-                        else {
-                            // Mask the number to the max banks
-                            rom_bank = (rb % rom_banks);
-                        }
-                    } break;
-                    case 0x4:
-                    case 0x5:
-                    {
-                        // RAM bank number / RTC register select
-                        if (value <= 0x03) {
-                            if (eram_banks >= 4) eram_bank = (value & 0x3);
-                            rtc_select_reg = 0;
-                        }
-                        else if (value >= 0x08 && value <= 0x0C) {
-                            rtc_select_reg = value;
-                        }
-                    } break;
-                    case 0x6:
-                    case 0x7:
-                    {
-                        // Latch Clock Data
-                        // When writing 0x00, and then 0x01 to this register, 
-                        // the current time becomes latched into the RTC registers. 
-                        // The latched data will not change until it becomes latched again, by repeating the procedure.
-                        if ((rtc_latch_reg == value) && (value <= 0x01)) {
-                            rtc_latch_reg++;
-                            if (rtc_latch_reg == 2) {
-                                rtc_latch_reg = 0;
-                                rtc_latch_flag = !rtc_latch_flag;
-                                // TODO: Latch the current time into the rtc registers...
-                                if (rtc_latch_flag) {
-
-                                }
-                            }
-                        }
-                    } break;
-                }
-            } break;
-            case 5:
-            {
-                switch ((u8)(addr >> 12)) {
-                    case 0x0:
-                    case 0x1:
-                    {
-                        // RAM enable
-                        eram_enabled = ((value & 0xF) == 0xA);
-                    } break;
-                    case 0x2:
-                    {
-                        // 8 bit register - ROM bank number
-                        // Mask the number to the max banks
-                        rom_bank = (rom_bank & 0xFF00) | value;
-                        rom_bank = rom_bank & (rom_banks - 1);
-                    } break;
-                    case 0x3:
-                    {
-                        // bit 8 of ROM bank number
-                        rom_bank_2 = (value & 1);
-                        rom_bank = (rom_bank & 0xFF) | (rom_bank_2 << 8);
-                        // Mask the number to the max banks
-                        rom_bank = (rom_bank & (rom_banks-1));
-                    } break;
-                    case 0x4:
-                    case 0x5:
-                    {
-                        // RAM bank number
-                        if (eram_banks >= (value & 0xF)) eram_bank = (value & 0xF);
-                    } break;
-                }
-            } break;
-        }
-    }
-    else {
-        switch (msb) {
-            case 0x8:
-            case 0x9:
-                // VRAM
-                if (lcd_mode == LCD_MODE_VRAM) {
-                    tick();
-                    return -1;
-                }
-
+    switch (msb) {
+        case 0x8:
+        case 0x9:
+            // VRAM
+            if (lcd_mode != LCD_MODE_VRAM) {
                 if (cgb_mode)   vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
                 else            vram[addr & 0x1FFF] = value;
-                break;
-            case 0xA:
-            case 0xB:
-                // ERAM
-                if (!eram_enabled) {
-                    tick();
-                    return -1;
-                }
-                if (mbc == 2) {
-                    // Half bytes, Bottom 9 bits of address are used to index RAM
-                    eram[addr & 0x1FF] = (value & 0xF);
-                }
-                else if (mbc == 3 && rtc_select_reg > 0) {
-                    // RTC register write
-                    rtc[rtc_select_reg] = value; 
-                }
-                else {
-                    // "& 0x1FF" extracts the lower 13 bits, which maps the address to the array range starting from 0x0
-                    if (eram_bank >= eram_banks) {
-                        tick();
-                        return -1;
-                    }
-                    eram[(addr & 0x1FFF) + (eram_bank * BANKSIZE_ERAM)] = value;
-                }
-                break;
-            case 0xC:
-            case 0xE:
-                // WRAM / ECHO RAM
-                wram[addr & 0xFFF] = value;
-                break;
-            case 0xD:
-            case 0xF:
-                // WRAM Bank / ECHO RAM
-                if (addr < MEM_OAM) {
-                    if (cgb_mode)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
-                    else            wram[addr & 0x1FFF] = value;
-                }
-                // Object attribute memory (OAM)
-                else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                    if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) {
-                        tick();
-                        return -1;
-                    }
-
+            }
+            break;
+        case 0xC:
+        case 0xE:
+            // WRAM / ECHO RAM
+            wram[addr & 0xFFF] = value;
+            break;
+        case 0xD:
+        case 0xF:
+            // WRAM Bank / ECHO RAM
+            if (addr < MEM_OAM) {
+                if (cgb_mode)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
+                else            wram[addr & 0x1FFF] = value;
+            }
+            // Object attribute memory (OAM)
+            else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
+                if (lcd_mode != LCD_MODE_VRAM && lcd_mode != LCD_MODE_OAM) {
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
                 }
-                else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
-                    tick();
-                    return -1;
-                }
-                // I/O Registers
-                else if (addr >= MEM_IO && addr < MEM_HRAM) {
-                    u8 reg_id = addr & 0xFF;
+            }
+            // High RAM
+            else if (addr >= MEM_HRAM && addr < MEM_IE) {
+                hram[addr - MEM_HRAM] = value;  // Convert to range 0-127
+            }
+            // Interrupt Enable register (IE)
+            else if (addr == MEM_IE){
+                reg[REG_IE] = value;
+            }
+            break;
+    }
 
-                    // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
-                    if (reg_id >= REG_NR10 && reg_id < REG_LCDC) {
-                        apu_write_register(reg_id, value);
-                        tick();
-                        return 0;
-                    }
+    tick(); // advance the clock 1 M-cycle
+}
 
-                    // other registers
-                    switch (reg_id) {
-                        case REG_P1:
-                            // only change bits 4 and 5 (rest are read-only)
-                            reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
-                            break;
-                        case REG_DIV:
-                            // emulates the internal div counter's bits changing 
-                            // from high to low which in turn triggers a timer increment.
-                            if (timer_enabled && GET_BIT(internal_counter, timer_clock_bit)) {
-                                tima_inc();
-                            }
-                            // the DIV-APU counter can be made to increase faster by writing to DIV
-                            // while its relevant bit is set (which clears DIV, and triggers the falling edge).
-                            if (GET_BIT(internal_counter, apu_clock_bit)) {
-                                apu_frame_sequencer_update();
-                            }
+u8 cpu_update()
+{
+    u8 op; // the current operand read from memory at PC location
+    u8 cycles;
 
-                            internal_counter = 0;
-                            reg[REG_DIV] = 0;
-                            break;
-                        case REG_TIMA:
-                            if (tima_reload_delay == 0) {
-                                reg[REG_TIMA] = value;
-                            }
-                            break;
-                        case REG_TMA:
-                            if (tima_reload_delay == 0) {
-                                reg[REG_TMA] = value;
-                            }
-                            break;
-                        case REG_TAC:
-                            // bit 0–1: Select at which frequency TIMA increases
-                            // More accurately it picks a bit from the internal clock and uses it to increase TIMA when it falls from 1 to 0
-                            switch (value & 0x3) {
-                                case 0: timer_speed = 1024; timer_clock_bit = 9; break;
-                                case 1: timer_speed = 16;   timer_clock_bit = 3; break;
-                                case 2: timer_speed = 64;   timer_clock_bit = 5; break;
-                                case 3: timer_speed = 256;  timer_clock_bit = 7;  break;
-                            }
-                            // bit 2: Enable timer
-                            // When disabling the timer, if the corresponding bit in the system counter is set to 1, the falling edge
-                            // detector will see a change from 1 to 0, so TIMA will increase.
-                            
-                            if (timer_enabled && !GET_BIT(value, 2)) {
-                                if (GET_BIT(internal_counter, timer_clock_bit)) {
-                                    tima_inc();
-                                }
-                            }
-                            timer_enabled = GET_BIT(value, 2);
-                            
-                            reg[REG_TAC] = value;
-                            break;
-                        case REG_IF:
-                            reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
-                            break;
-                        case 0x50: // BOOT register (read only)
-                            tick();
-                            return -1;
-                            break;
-                        case REG_LCDC:
-                            if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
-                                printf("illegal LCD disable\n");
-                            }
-                            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
-                            {
-                                ppu_clear_screen();
-                                lcd_enabled = 0;
-                            }
-                            else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
-                                //printf("lcd enabled\n");
-                                lcd_enabled = 1;
-                                check_lyc();
-                                check_stat_irq(0);
-                            }
-                            reg[REG_LCDC] = value;
-                            break;
-                        case REG_STAT:
-                            // STAT irq blocking / bug
-                            // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
-                            // call your STAT IRQ poll function, then set STAT enable flags to their true values.
-                            
-                            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
-                            // so it does not block if Mode 0 is enabled as well.
-                            reg[REG_STAT] = value ;
-                            if (lcd_enabled) {
-                                if (!cgb_mode) stat_bug = 1;
-                                check_stat_irq(0);
-                            }
-                            break;
-                        case REG_SCX:
-                            if (value == 32) {
-                                //debug_show_tracelog = 1;
-                            }
-                            reg[REG_SCX] = value;
-                            break;
-                        case REG_LY: 
-                            if (lcd_enabled) reg[REG_LY] = 0;
-                            break; // read only
-                        case REG_LYC:
-                            reg[REG_LYC] = value;
+    if (debug_show_tracelog) {
+        if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
+        {
+            printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X IDIV=%03d TIMA=%02X\n",
+                counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
+                BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], internal_counter & 0xFF, reg[REG_TIMA]);
+            /*
+            printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
+                counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
+                SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
+                */
+        }
+        counter++;
+    }
 
-                            if (lcd_enabled) {
-                                check_lyc();
-                                check_stat_irq(0);
-                            }
-                            break;
-                        case REG_DMA:
-                            // DMA transfer - value specifies the transfer source address divided by $100
-                            // Source:      $XX00-$XX9F   ;XX = $00 to $DF
-                            // Destination: $FE00-$FE9F
-                            reg[REG_DMA] = value;
-                            dma_transfer_flag = 1;
-                            break;
-                        
-                        case REG_BGP:
-                            ppu_update_palette(REG_BGP, value);
-                            break;
-                        case REG_OBP0:
-                            ppu_update_palette(REG_OBP0, value);
-                            break;
-                        case REG_OBP1:
-                            ppu_update_palette(REG_OBP1, value);
-                            break;
-                        case REG_OBPD:
-                            if (lcd_mode == LCD_MODE_VRAM) {
-                                tick();
-                                return -1;
-                            }
-                            reg[REG_OBPD] = value;
-                            break;
-                        default:
-                            reg[reg_id] = value;   // Convert to range 0-255
-                            break;
-                    }
-                    
+    if (halted) op = 0x00; // NOOP
+    else op = read(PC++);
+    tick();
+
+    cycles = execute_instruction(op);
+
+    // Interrupt handling
+    cycles += do_interrupts();
+    // The effect of the EI instruction is delayed by one instruction
+    if (ei_flag) {
+        ei_flag = 0;
+        interrupts_enabled = 1;
+    }
+
+    return (cycles >> double_speed);
+}
+
+
+inline u8 interrupt_is_pending() {
+    return (((reg[REG_IE] & 0x1F) & (reg[REG_IF] & 0x1F)) != 0);
+}
+u8 do_interrupts() {
+    u8 cycles = 0;
+    if (!interrupt_is_pending()) return cycles;
+
+    if (halted) {
+        halted = 0; // The CPU wakes up
+        //printf("CPU woke up\n");
+    }
+    //printf("%d", reg[REG_IE]);
+    // The interrupt handler is called normally
+    if (interrupts_enabled) {
+        // Interrupt priority
+        for (u8 i = 0; i <= 4; i++) {
+            if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
+                RESET_BIT(reg[REG_IF], i);
+                interrupts_enabled = 0;
+                if (i == 4) {
+                    u8 i = 0;
                 }
-                // High RAM
-                else if (addr >= MEM_HRAM && addr < MEM_IE) {
-                    hram[addr - MEM_HRAM] = value;  // Convert to range 0-127
+                // CALL interrupt vector
+                // push PC onto stack, then jump to address
+                tick();
+                tick();
+                write(--SP.full, (PC >> 8) & 0xFF);
+                write(--SP.full, (PC & 0xFF));
+                switch (i) {
+                    case 0: 
+                        PC = INT_VEC_VBLANK; break; //printf("vb\n"); break;
+                    case 1: 
+                        PC = INT_VEC_STAT; 
+                        //stat_irq_flag = 0; 
+                        break; //printf("st\n");break;
+                    case 2: PC = INT_VEC_TIMER;  break; //printf("tm\n");break;
+                    case 3: PC = INT_VEC_SERIAL; break; //printf("sr\n");break;
+                    case 4: PC = INT_VEC_JOYPAD; break; //printf("jp\n");break;
                 }
-                // Interrupt Enable register (IE)
-                else if (addr == MEM_IE){
-                    reg[REG_IE] = value;
-                }
+                tick();
+                cycles = 20;
+                break;
+            }
         }
     }
-    tick(); // advance the clock 1 M-cycle
-    return 0;
+    // TODO - halt bug
+    else {
+        
+
+    }
+    return cycles;
 }
+
 
 u8 execute_cb(u8 op) {
     // Prefix CB
@@ -1972,42 +1489,6 @@ u8 execute_cb(u8 op) {
     }
     return cycles;
 }
-
-void tick() {
-    u8 cycles = 4;
-    u16 clock_prev = internal_counter;
-
-    // DMA transfer is running
-    if (dma_transfer_flag) {
-        dma_access_flag = 1;
-        u8 t_u8 = read((reg[REG_DMA] << 8) | dma_index);
-        dma_access_flag = 0;
-
-        oam[dma_index] = t_u8;
-        dma_index++;
-
-        if (dma_index > 0x9F) {
-            dma_index = 0;
-            dma_transfer_flag = 0;
-        }
-    }
-
-    input_tick();
-    update_timers(cycles >> double_speed);
-    ppu_tick(cycles);
-    
-    // “DIV-APU” counter / frame sequencer is increased every time DIV’s bit 4 (5 in double-speed mode) goes from 1 to 0, 
-    // TODO add support for double speed mode (changes apu_clock_bit to 13 instead of 12)
-    if (GET_BIT(clock_prev, apu_clock_bit) && !GET_BIT(internal_counter, apu_clock_bit)) {
-        apu_frame_sequencer_update();
-        //printf("clock prev: %02X, clock new: %02X\n", (clock_prev >> 8) & 0xFF, reg[REG_DIV]);
-    }
-    apu_tick();
-    //
-    
-    if (stat_bug) stat_bug = 0;
-}
-
 u8 execute_instruction(u8 op) {
     u8       cycles;
     s8       t_s8;
@@ -3097,180 +2578,4 @@ u8 execute_instruction(u8 op) {
             break;
     }
     return cycles;
-}
-
-void update_timers(u8 cycles) {
-    u8 clock = (cycles);
-    u8 timer_and_check_old = timer_enabled & GET_BIT(internal_counter, timer_clock_bit);
-    u8 timer_and_check_new;
-
-    // DIV is incremented at 16384Hz / 32768Hz in double speed
-    internal_counter = (internal_counter + clock) & 0xFFFF;
-    reg[REG_DIV] = (internal_counter >> 8) & 0xFF;
-
-    // TIMA reload delay
-    if (tima_reload_delay > 0) {
-        if ((s8)tima_reload_delay - clock >= 0) tima_reload_delay -= clock;
-        else {
-            tima_reload_delay = 0;
-        }
-        // Timer interrupt
-        if (tima_reload_delay == 0) {
-            SET_BIT(reg[REG_IF], INT_BIT_TIMER);
-        }
-    }
-
-    timer_and_check_new = timer_enabled & GET_BIT(internal_counter, timer_clock_bit);
-
-    // TIMA is incremented when detecting a falling edge from ANDing the enable bit in TAC with the bit of the system internal counter
-    if (timer_and_check_old && !timer_and_check_new) {
-        tima_inc();
-    }
-    //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
-
-}
-
-void tima_inc() {
-    u8 tima_old = reg[REG_TIMA];
-    reg[REG_TIMA] = (tima_old + 1) & 0xFF;
-    // if overflow occured
-    if (reg[REG_TIMA] < tima_old) {
-        reg[REG_TIMA] = (reg[REG_TIMA] + reg[REG_TMA]);
-        tima_reload_delay = 4;
-    }
-}
-
-u8 do_interrupts() {
-    u8 cycles = 0;
-    if (!interrupt_is_pending()) return cycles;
-
-    if (halted) {
-        halted = 0; // The CPU wakes up
-        //printf("CPU woke up\n");
-    }
-    //printf("%d", reg[REG_IE]);
-    // The interrupt handler is called normally
-    if (interrupts_enabled) {
-        // Interrupt priority
-        for (u8 i = 0; i <= 4; i++) {
-            if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
-                RESET_BIT(reg[REG_IF], i);
-                interrupts_enabled = 0;
-                if (i == 4) {
-                    u8 i = 0;
-                }
-                // CALL interrupt vector
-                // push PC onto stack, then jump to address
-                tick();
-                tick();
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
-                switch (i) {
-                    case 0: 
-                        PC = INT_VEC_VBLANK; break; //printf("vb\n"); break;
-                    case 1: 
-                        PC = INT_VEC_STAT; 
-                        //stat_irq_flag = 0; 
-                        break; //printf("st\n");break;
-                    case 2: PC = INT_VEC_TIMER;  break; //printf("tm\n");break;
-                    case 3: PC = INT_VEC_SERIAL; break; //printf("sr\n");break;
-                    case 4: PC = INT_VEC_JOYPAD; break; //printf("jp\n");break;
-                }
-                tick();
-                cycles = 20;
-                break;
-            }
-        }
-    }
-    // TODO - halt bug
-    else {
-        
-
-    }
-    return cycles;
-}
-
-
-void cpu_update()
-{
-    u8 op; // the current operand read from memory at PC location
-    u8 cycles;
-
-    cycles_this_update = 0;
-    //printf("ly start: %d,", reg[REG_LY]);
-    while (cycles_this_update < MAXDOTS)
-    {
-        u8 ly_start = reg[REG_LY];
-        if (debug_show_tracelog) {
-            if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
-            {
-                printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X IDIV=%03d TIMA=%02X\n",
-                    counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                    BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], internal_counter & 0xFF, reg[REG_TIMA]);
-                /*
-                printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
-                    counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
-                    SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
-                    */
-            }
-            counter++;
-            // Fetch instruction
-            if (counter % 1000 == 0)
-            {
-                u8 i = 0;
-            }
-            if (counter == 251000) {
-                u8 i = 0;
-            }
-        }
-
-        // normal operation
-        if (halted) op = 0x00; // NOOP
-        else op = read(PC++);
-        tick();
-
-        cycles = execute_instruction(op);
-        
-        
-        // Interrupt handling
-        cycles += do_interrupts();
-        // The effect of the EI instruction is delayed by one instruction
-        if (ei_flag) {
-            ei_flag = 0;
-            interrupts_enabled = 1;
-        }
-
-        cycles_this_update += (cycles >> double_speed);
-        
-        // handle pending interrupts after every instruction
-        /*
-        // blarggs test - serial output
-        if (reg[REG_SC] == 0x81) {
-            char c = reg[REG_SB];
-            printf("%c", c);
-            reg[REG_SC] = 0x0;
-        }
-        */
-        // vsync - end frame every full screen cycle
-        if (lcd_enabled && ly_start != reg[REG_LY] && reg[REG_LY] == 0) break;
-    }
-
-    //printf("ly end: %d cycles: %d\n", reg[REG_LY], cycles_this_update);
-    // Autosaving
-    if (save_enabled) {
-        autosave_counter++;
-        if (autosave_counter >= AUTOSAVE_INTERVAL) {
-            save();
-            autosave_counter = 0;
-        }
-    }
-}
-
-void cpu_cleanup()
-{
-    if (rom) free(rom);
-    if (eram) {
-        save();
-        free(eram);
-    }
 }

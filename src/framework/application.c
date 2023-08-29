@@ -11,25 +11,29 @@
 
 #include "graphics.h"
 #include "audio.h"
-#include "cpu.h"
-#include "ppu.h"
-#include "input.h"
-#include "apu.h"
+#include "gb.h"
+
 
 
 SDL_Window* window = NULL;
 SDL_Event   window_event;
 const Uint8* kb_state;
 
-int         window_scale = 4;
-int         fps = 60;
-double      tick_rate = 1000.0 / 60.0; // Milliseconds per frame
+int     sdl_initialized     = 0;
+int     gl_initialized      = 0;
+int     audio_initialized   = 0;
+int     gb_initialized      = 0;
+
+
+int     window_scale = 4;
+int     fps = 60;
+double  tick_rate = 1000.0 / 180; // Milliseconds per frame
 
 // shared variables
 const char* rom_file_name = "pokemon red";
 const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
-
+/* 
 int EventFilter(void* userdata, SDL_Event* event) {
     // Process SDL_QUIT event
     if (event->type == SDL_QUIT 
@@ -41,6 +45,7 @@ int EventFilter(void* userdata, SDL_Event* event) {
     // Ignore other events
     return 0; // Ignore the event
 }
+*/
 
 int application_init(const char* title) {
     const char* path_arr[] = { rom_file_path, rom_file_name, ".gb"};
@@ -55,6 +60,7 @@ int application_init(const char* title) {
         fprintf(stderr, "%s\n", SDL_GetError());
         return -1;
     }
+
     // Create the main window
     window = SDL_CreateWindow(
         title,
@@ -63,6 +69,7 @@ int application_init(const char* title) {
         SCREEN_WIDTH * window_scale, 
         SCREEN_HEIGHT * window_scale, 
         SDL_WINDOW_OPENGL);
+
     if (!window)
     {
         fprintf(stderr, "%s\n", SDL_GetError());
@@ -70,39 +77,28 @@ int application_init(const char* title) {
         return -1;
     }
 
+    sdl_initialized = 1;
+
     // Set the event filter
     //SDL_SetEventFilter(EventFilter, NULL); // NULL for user data
+
+    // Pointer to an array of key states. Only needs to be set once.
     kb_state = SDL_GetKeyboardState(&num_keys);
     
     // Initialize OpenGL stuff
-    if (!graphics_init(window))
+    gl_initialized = graphics_init(window);
+    if (!gl_initialized)
     {
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+        application_cleanup();
         return -1;
     }
 
     // Initialize audio stuff
-    if (!audio_init()) {
-        audio_cleanup();
-        graphics_cleanup();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+    audio_initialized = audio_init();
+    if (!audio_initialized) {
+        application_cleanup();
         return -1;
     }
-
-    /////////////////////////////////////////////////////
-    // DEBUG audio test
-    
-    /*
-    audio_cleanup();
-    graphics_cleanup();
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-    return -1;
-    */
-
-    //////////////////////////////////////////////////////
 
     // Load ROM
     rom_path = combine_strings(path_arr, 3);
@@ -112,53 +108,37 @@ int application_init(const char* title) {
     }
     if (rom_buffer == NULL)
     {
-        audio_cleanup();
-        graphics_cleanup();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+        fprintf(stderr, "Failed to allocate memory for ROM buffer!\n");
+        application_cleanup();
         return -1;
     }
     
-
-    // Initialize emulator cpu
-    if (cpu_init(rom_buffer) == -1)
-    {
-        audio_cleanup();
-        graphics_cleanup();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+    // Initialize emulator
+    gb_initialized = gb_init(rom_buffer);
+    if (!gb_initialized) {
+        fprintf(stderr, "Failed to initialize emulator!\n");
+        application_cleanup();
         return -1;
     }
-
-    // Initialize emulator gpu
-    if (ppu_init() == -1)
-    {
-        cpu_cleanup();
-        audio_cleanup();
-        graphics_cleanup();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return -1;
-    }
-    // Initialize emulator audio
-    apu_init();
 
     return 0;
 }
 
 void application_update() {
     
-    u32   current_time      = 0;
-    double   delta          = 0;
-    double timer_total      = 0; // Total game time
-    u32   last_frame_time   = SDL_GetTicks(); // Set to current time when difference is bigger than 1/60
-    u8    keep_window_open  = 1;
+    u32     current_time        = 0;
+    double  delta               = 0;
+    double  timer_total         = 0;                // Total game time
+    u32     last_frame_time     = SDL_GetTicks();   // Set to current time when difference is bigger than 1/60
+    u8      keep_window_open    = 1;
 
     // DEBUG FPS calculation
-    u32 total_frames = 0;
-    u32 start_time = SDL_GetTicks();
+    u32     total_frames        = 0;
+    u32     start_time          = SDL_GetTicks();
 
     while (keep_window_open) {
+        u8 inputs[8];
+        u8 redraw_flag;
 
         current_time = SDL_GetTicks();
         delta += current_time - last_frame_time;
@@ -182,8 +162,7 @@ void application_update() {
             switch (window_event.type) {
             case SDL_QUIT:
                 keep_window_open = 0;
-                break;
-
+                continue;
             case SDL_MOUSEMOTION:
             {
                 //int x = window_event.motion.x / window_scale;
@@ -197,26 +176,23 @@ void application_update() {
             }
         }
         // Array of pressed inputs, which is later passed to the emulator.
-        u8 inputs[8] = { 
-            kb_state[SDL_SCANCODE_RIGHT], 
-            kb_state[SDL_SCANCODE_LEFT], 
-            kb_state[SDL_SCANCODE_UP],
-            kb_state[SDL_SCANCODE_DOWN],
-            kb_state[SDL_SCANCODE_X],
-            kb_state[SDL_SCANCODE_Z],
-            kb_state[SDL_SCANCODE_A],
-            kb_state[SDL_SCANCODE_S]
-        };
+        inputs[0] = kb_state[SDL_SCANCODE_RIGHT];
+        inputs[1] = kb_state[SDL_SCANCODE_LEFT];
+        inputs[2] = kb_state[SDL_SCANCODE_UP];
+        inputs[3] = kb_state[SDL_SCANCODE_DOWN];
+        inputs[4] = kb_state[SDL_SCANCODE_X];
+        inputs[5] = kb_state[SDL_SCANCODE_Z];
+        inputs[6] = kb_state[SDL_SCANCODE_A];
+        inputs[7] = kb_state[SDL_SCANCODE_S];
 
         // Update frame logic
         timer_total += tick_rate;
 
-        input_update((u8*)&inputs);
-        // Update cpu logic
-        cpu_update();
+        // Run one frame of the emulator, returns 1 if screen needs redrawing, 0 otherwise.
+        redraw_flag = gb_update((u8*) & inputs);
 
         // Draw
-        application_draw();
+        if (redraw_flag) application_draw();
 
 
 
@@ -233,7 +209,7 @@ void application_update() {
         double average_fps = total_frames / (elapsed_time / 1000.0); // Divide by 1000 to convert milliseconds to seconds
         // Print or use the average_fps value as needed
         if (total_frames > 0 && total_frames % 20 == 0) {
-            char str[10];
+            char str[6];
             sprintf(str, "%d", (u32)average_fps);
             SDL_SetWindowTitle(window, str);
         }
@@ -241,21 +217,20 @@ void application_update() {
 }
 
 void application_draw() {
-    if (!ppu_get_redraw_flag()) return; // Only draws when necessary
-
-    graphics_update_rgba_buffer(ppu_get_pixel_buffer());
+    // Converts the emulator's screen buffer into RGBA format
+    graphics_update_rgba_buffer(gb_get_screen_buffer());
+    // Display the buffer's contents on the SDL screen
     graphics_draw(window);
-
-    ppu_set_redraw_flag(0);
 }
 
 void application_cleanup() {
-    cpu_cleanup();
-    ppu_cleanup();
-    audio_cleanup();
-    graphics_cleanup();
-    if (window) SDL_DestroyWindow(window);
-    SDL_Quit();
+    if (gb_initialized)     gb_cleanup();
+    if (audio_initialized)  audio_cleanup();
+    if (gl_initialized)     graphics_cleanup();
 
+    if (sdl_initialized) {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+    }
 }
 

@@ -10,6 +10,7 @@ extern void audio_add_sample(u8 sample);
 
 u16 sample_frequency = 95;  // how often to gather samples 4194304 Hz / 44100 / Hz / 4 t-cycles
 u16 sample_timer = 0;       // counts up to sample_frequency
+int apu_counter = 0;
 
 u8 apu_enabled;             // copy of register NR52 bit 7 
 u8 frame_sequencer;
@@ -20,7 +21,7 @@ u8 vin_pan_l, vin_pan_r;    // VIN panning     0/1 flag
 
 u8 ch1_sweep_pace;          // how quickly the sweep period gets changed over time 0-7 range
 u8 ch1_sweep_negative;      // sweep increase/decrease 0/1 flag
-u8 ch1_sweep_slope;         // how big the sweep period change is each iteration
+u8 ch1_sweep_shift;         // how big the sweep period change is each iteration
 u8 ch1_sweep_counter;
 u8 ch1_sweep_enabled;       // internal flag
 u16 ch1_freq_shadow;        // frequency shadow register
@@ -85,15 +86,13 @@ Channel ch3;
 Channel ch4;
 
 
-
 // Forward declaration
 void    turn_off();
-u8      apu_read_register(u8 reg_id);
-int     apu_write_register(u8 reg_id, u8 value);
 void    update_length();
 void    update_envelope();
 void    update_ch1_sweep();
 u16     calculate_ch1_sweep_frequency();
+
 
 // PUBLIC   -------------------------------------------------
 
@@ -176,33 +175,29 @@ u8 apu_read_register(u8 reg_id) {
     switch (reg_id) {
         // Pulse/Square Channel 1
         case REG_NR11:
-            return (reg[REG_NR11] | 0x3F); // bits 0~5 are write only (masked with 0b 0011 1111)
+            return (reg[reg_id] | 0x3F); // bits 0~5 are write only (masked with 0b 0011 1111)
         case REG_NR13:
             return 0xFF; // write only
         case REG_NR14:
-            return (reg[REG_NR14] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
+            return (reg[reg_id] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
         
         // Pulse/Square Channel 2
         case REG_NR21:
-            return (reg[REG_NR21] | 0x3F); // bits 0~5 are write only (masked with 0b 0011 1111)
+            return (reg[reg_id] | 0x3F); // bits 0~5 are write only (masked with 0b 0011 1111)
         case REG_NR23:
             return 0xFF; // write only
         case REG_NR24:
-            return (reg[REG_NR24] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
+            return (reg[reg_id] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
 
         // Wave Channel 3
-        case REG_NR31:
-            return 0xFF; // write only
         case REG_NR33:
             return 0xFF; // write only
         case REG_NR34:
-            return (reg[REG_NR34] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
+            return (reg[reg_id] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
 
         // Wave Channel 4
-        case REG_NR41:
-            return 0xFF; // write only
         case REG_NR44:
-            return (reg[REG_NR44] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
+            return (reg[reg_id] | 0xBF); // only bit 6 is readable (masked with 0b 1011 1111)
 
         default:
             return reg[reg_id];
@@ -210,8 +205,8 @@ u8 apu_read_register(u8 reg_id) {
 }
 
 int apu_write_register(u8 reg_id, u8 value) {
-    // Turning the APU off makes its registers read-only until turned back on, except NR52
-    if (!apu_enabled && reg_id != REG_NR52) return -1;
+    // Turning the APU off makes its registers read-only until turned back on, except NR52 and Wave RAM
+    if (!apu_enabled && reg_id != REG_NR52 && reg_id < REG_WAVERAM) return -1;
 
     switch (reg_id) {
         // Square 1 & Sweep Channel
@@ -230,7 +225,7 @@ int apu_write_register(u8 reg_id, u8 value) {
                 ch1_sweep_pace  = (value >> 4) & 0x7;
             }
             ch1_sweep_negative  = GET_BIT(value, 3);
-            ch1_sweep_slope     = value & 0x7;
+            ch1_sweep_shift     = value & 0x7;
 
             reg[reg_id] = value;
 
@@ -285,9 +280,9 @@ int apu_write_register(u8 reg_id, u8 value) {
                 // frequency is copied to the shadow register.
                 ch1_freq_shadow = ch1.frequency;
                 // the internal enabled flag is set if either the sweep period or shift are non-zero, cleared otherwise.
-                ch1_sweep_enabled = (ch1_sweep_pace || ch1_sweep_slope);
+                ch1_sweep_enabled = (ch1_sweep_pace || ch1_sweep_shift);
                 // if the sweep shift is non-zero, frequency calculation and the overflow check are performed immediately.
-                if (ch1_sweep_slope != 0) 
+                if (ch1_sweep_shift != 0) 
                     ch1.frequency = calculate_ch1_sweep_frequency();
                 // if length counter is zero, it is set to 64 (256 for wave channel).
                 if (ch1.len_timer == 64) ch1.len_timer = 0;
@@ -355,16 +350,6 @@ int apu_write_register(u8 reg_id, u8 value) {
             ch2.len_enabled = GET_BIT(value, 6);
             // trigger the channel
             if (GET_BIT(value, 7)) {
-                /*
-                * TODO
-                Frequency timer is reloaded with period.
-                Volume envelope timer is reloaded with period.
-                Channel volume is reloaded from NRx2.
-                Noise channel's LFSR bits are all set to 1.
-                Wave channel's position is set to 0 but sample buffer is NOT refilled.
-                Square 1's sweep does several things (see frequency sweep).
-                */
-
                 ch2.enabled = 1;
 
                 // if length counter is zero, it is set to 64 (256 for wave channel).
@@ -603,12 +588,12 @@ void apu_frame_sequencer_update() {
 }
 
 void ch1_tick() {
-    u8 cycles = 4;
+    u8 clock = M_CYCLE;
     u8 timer_prev = ch1.timer;
 
     //if (!ch1.enabled) return;
 
-    ch1.timer -= cycles;
+    ch1.timer -= clock;
     // timer underflow
     if (ch1.timer <= timer_prev) {
         ch1.timer += ((2048 - ch1.frequency) << 2);
@@ -616,21 +601,21 @@ void ch1_tick() {
         ch1_sequence = (u8)(ch1_sequence + 1) & 7;
         // fetch new output
         if (ch1.enabled && GET_BIT(sw_duty_cycle[ch1_duty_cycle], ch1_sequence))
-            ch1.output = 128 + (u8)(15.0 * ((float)ch1_env_vol / 15.0));
+            ch1.output = ch1_env_vol;
         else
-            ch1.output = 128;
+            ch1.output = 0;
 
         //printf("%d,", ch1.output);
     }
 }
 
 void ch2_tick() {
-    u8 cycles = 4;
+    u8 clock = M_CYCLE;
     u8 timer_prev = ch2.timer;
 
     //if (!ch1.enabled) return;
 
-    ch2.timer -= cycles;
+    ch2.timer -= clock;
     // timer underflow
     if (ch2.timer <= timer_prev) {
         ch2.timer += ((2048 - ch2.frequency) << 2);
@@ -638,19 +623,19 @@ void ch2_tick() {
         ch2_sequence = (u8)(ch2_sequence + 1) & 7;
         // fetch new output
         if (ch2.enabled && GET_BIT(sw_duty_cycle[ch2_duty_cycle], ch2_sequence))
-            ch2.output = 128 + (u8)(15.0 * ((float)ch2_env_vol / 15.0));
+            ch2.output = ch2_env_vol;
         else
-            ch2.output = 128;
+            ch2.output = 0;
 
         //printf("%d,", ch2.output);
     }
 }
 
 void ch3_tick() {
-    u8 cycles = 4;
+    u8 clock = M_CYCLE;
     u8 timer_prev = ch3.timer;
 
-    ch3.timer -= cycles;
+    ch3.timer -= clock;
     // timer underflow
     if (ch3.timer <= timer_prev) {
         ch3.timer += ((2048 - ch3.frequency) << 1);
@@ -681,10 +666,10 @@ void ch3_tick() {
                 case 2: volume = wave_val >> 1; break;
                 case 3: volume = wave_val >> 2; break;
             }
-            ch3.output = 128 + (u8)(15.0 * ((float)volume / 15.0));
+            ch3.output = volume;
         }
         else
-            ch3.output = 128;
+            ch3.output = 0;
 
         // reload frequency
         ch3.frequency = ((((reg[REG_NR34] & 7) & 0xFF) << 8) & 0xFF00) | (reg[REG_NR33] & 0xFF);
@@ -693,12 +678,12 @@ void ch3_tick() {
 }
 
 void ch4_tick() {
-    u8 cycles = 4;
+    u8 clock = M_CYCLE;
     u8 timer_prev = ch4.timer;
 
     //if (!ch1.enabled) return;
 
-    ch4.timer -= cycles;
+    ch4.timer -= clock;
     // timer underflow
     if (ch4.timer <= timer_prev) {
         u8 xor_val;
@@ -714,9 +699,9 @@ void ch4_tick() {
         }
         // fetch new output
         if (ch4.enabled && !GET_BIT(lfsr, 0))
-            ch4.output = 128 + (u8)(15.0 * ((float)ch4_env_vol / 15.0));
+            ch4.output = ch4_env_vol;
         else
-            ch4.output = 128;
+            ch4.output = 0;
 
         //printf("%d,", ch4.output);
     }
@@ -726,22 +711,28 @@ void ch4_tick() {
 
 void apu_tick() {
 
+    if (!apu_enabled) return;
+
     ch1_tick();
     ch2_tick();
     ch3_tick();
     ch4_tick();
 
-    sample_timer += 4;
-    if (sample_timer >= sample_frequency * frameskip) {
-        u8 sample;
+    sample_timer += M_CYCLE;
+    if (sample_timer >= sample_frequency) {
+        // Generates an audio sample and outputs it to SDL
+        float output;
+        
+        apu_counter++;
+        sample_timer -= sample_frequency;
 
-        sample_timer -= sample_frequency * frameskip;
+        // when speeding up the emulator, only collect every Nth sample
+        if (apu_counter % frameskip != 0) return;
         // gather sample
-        sample = (u8)(((float)ch1.output * 0.25) + ((float)ch2.output * 0.25) + ((float)ch3.output * 0.25) + ((float)ch4.output * 0.25));
-        //sample = (u8)(((float)ch1.output * 0.5) + ((float)ch2.output * 0.5));
-        //sample = (u8)(ch1.output);
-        //printf("%d,", ch1.output);
-        audio_add_sample(sample);
+        output = (ch1.output + ch2.output + ch3.output + ch4.output) * 2.0f;
+        output = output * ((float)(vol_l + vol_r) / 14.0f);
+
+        audio_add_sample((u8)output);
     }
     
 
@@ -767,7 +758,7 @@ void update_ch1_sweep() {
                 then frequency calculation and overflow check are run AGAIN immediately using this new value, 
                 but this second new frequency is not written back. */
                 u16 freq_new = calculate_ch1_sweep_frequency();
-                if (freq_new <= 2047 && ch1_sweep_slope != 0) {
+                if (freq_new <= 2047 && ch1_sweep_shift != 0) {
                     ch1.frequency = freq_new;
                     reg[REG_NR13] = freq_new & 0xFF;
                     reg[REG_NR14] = (reg[REG_NR14] & 0x1F) | ((freq_new >> 8) & 0xFF);
@@ -789,7 +780,7 @@ u16 calculate_ch1_sweep_frequency() {
     What is done with this new frequency depends on the context.
     The overflow check simply calculates the new frequency and if this is greater than 2047, square 1 is disabled. */
     u16 freq_new;
-    u16 shift_val = ch1_freq_shadow >> ch1_sweep_slope;
+    u16 shift_val = ch1_freq_shadow >> ch1_sweep_shift;
     
     freq_new = ch1_sweep_negative ? ch1_freq_shadow - shift_val : ch1_freq_shadow + shift_val;
 
@@ -938,6 +929,55 @@ void turn_off() {
     reg[REG_NR44] = 0;
     reg[REG_NR50] = 0;
     reg[REG_NR51] = 0;
+    reg[REG_NR52] = 0x80; // except high bit
 
-    reg[REG_WAVERAM] = 0;
+    for (int i = 0; i < 16; i++) {
+        reg[REG_WAVERAM + i] = 0;
+    }
+
+    sample_timer = 0; 
+    apu_counter = 0;
+
+    frame_sequencer = 0;
+
+    vol_l = 0; vol_r = 0;
+    vin_pan_l = 0; vin_pan_r = 0;
+
+    ch1_sweep_pace = 0;
+    ch1_sweep_negative = 0;
+    ch1_sweep_shift = 0;
+    ch1_sweep_counter = 0;
+    ch1_sweep_enabled = 0;
+    ch1_freq_shadow = 0;
+
+    ch1_duty_cycle = 0;
+    ch1_sequence = 0;
+    ch1_env_sweep_pace = 0;
+    ch1_env_positive = 0;
+    ch1_env_vol = 0;
+    ch1_env_sweep_counter = 0;
+    ch1_env_enabled = 0;
+
+    ch2_duty_cycle = 0;
+    ch2_sequence = 0;
+    ch2_env_sweep_pace = 0; 
+    ch2_env_positive = 0;
+    ch2_env_vol = 0;
+    ch2_env_sweep_counter = 0;
+    ch2_env_enabled = 0;
+
+    ch3_vol = 0;
+    ch3_wave_position = 0;
+
+    lfsr = 0;
+    ch4_clock_div = 0;
+    ch4_lfsr_width_mode = 0;
+    ch4_clock_shift = 0;
+
+    ch4_env_sweep_pace = 0;
+    ch4_env_positive = 0;
+    ch4_env_vol = 0;
+    ch4_env_sweep_counter = 0;
+    ch4_env_enabled = 0;
+
 }

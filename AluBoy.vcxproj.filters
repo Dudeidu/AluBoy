@@ -15,57 +15,75 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\graphics.c">
+    <ClCompile Include="src\framework\graphics.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ppu.c">
+    <ClCompile Include="src\emulator\ppu.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\application.c">
+    <ClCompile Include="src\framework\application.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\cpu.c">
+    <ClCompile Include="src\emulator\cpu.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="include\emu_shared.h">
+    <ClCompile Include="src\emulator\emu_shared.h">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\input.c">
+    <ClCompile Include="src\emulator\input.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="include\apu.h">
+    <ClCompile Include="src\emulator\apu.h">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\audio.c">
+    <ClCompile Include="src\framework\audio.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\apu.c">
+    <ClCompile Include="src\emulator\apu.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\emulator\gb.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\emulator\mmu.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\emulator\timer.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\graphics.h">
+    <ClInclude Include="src\framework\graphics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\ppu.h">
+    <ClInclude Include="src\emulator\ppu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\cpu.h">
+    <ClInclude Include="src\emulator\cpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\application.h">
+    <ClInclude Include="src\framework\application.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\macros.h">
+    <ClInclude Include="src\utils\macros.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\input.h">
+    <ClInclude Include="src\emulator\input.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\audio.h">
+    <ClInclude Include="src\framework\audio.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\emulator\gb.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\emulator\mmu.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\emulator\timer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

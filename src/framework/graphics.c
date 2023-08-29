@@ -213,7 +213,9 @@ void graphics_cleanup()
     GL_CALL( glDeleteVertexArrays(1, &m_vao) );
     SDL_GL_DeleteContext(m_context);
 
-    if (rgba_buffer) free(rgba_buffer);
+    if (rgba_buffer) {
+        free(rgba_buffer);
+    }
 }
 
 int create_rgba_buffer()

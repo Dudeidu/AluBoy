@@ -1,0 +1,23 @@
+#pragma once
+
+#ifndef GB_H
+#define GB_H
+
+#include "alu_binary.h"
+
+// Initialize emulator components
+int gb_init(u8* rom_buffer);
+
+// Advance the emulator by one frame, taking in the input data from the device
+// returns 1 if screen needs redrawing, 0 otherwise.
+int gb_update(u8* inputs);
+
+// This emulates 1 M-cycle / 4 T-cycles
+void tick();
+
+// Fetch a pointer to the PPU's screen buffer
+u8* gb_get_screen_buffer();
+
+void gb_cleanup();
+
+#endif GB_H
