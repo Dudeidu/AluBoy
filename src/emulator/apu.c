@@ -5,7 +5,7 @@
 #include <string.h>
 #include "emu_shared.h"
 
-extern void audio_add_sample(u8 sample);
+#include "gb.h"
 
 
 u16 sample_frequency = 95;  // how often to gather samples 4194304 Hz / 44100 / Hz / 4 t-cycles
@@ -97,9 +97,40 @@ u16     calculate_ch1_sweep_frequency();
 // PUBLIC   -------------------------------------------------
 
 void apu_init() {
+
+}
+
+void apu_powerup()
+{
     apu_enabled     = 1;
     frame_sequencer = 0;
     apu_clock_bit   = 12;
+
+    reg[REG_NR10] = 0x80;
+    reg[REG_NR11] = 0xBF;
+    reg[REG_NR12] = 0xF3;
+    reg[REG_NR13] = 0xFF;
+    reg[REG_NR14] = 0xBF;
+
+    reg[REG_NR21] = 0x3F;
+    reg[REG_NR22] = 0x00;
+    reg[REG_NR23] = 0xFF;
+    reg[REG_NR24] = 0xBF;
+
+    reg[REG_NR30] = 0x7F;
+    reg[REG_NR31] = 0xFF;
+    reg[REG_NR32] = 0x9F;
+    reg[REG_NR33] = 0xFF;
+    reg[REG_NR34] = 0xBF;
+
+    reg[REG_NR41] = 0xFF;
+    reg[REG_NR42] = 0x00;
+    reg[REG_NR43] = 0x00;
+    reg[REG_NR44] = 0xBF;
+
+    reg[REG_NR50] = 0x77;
+    reg[REG_NR51] = 0xF3;
+    reg[REG_NR52] = 0xF1; // F1-GB, F0-SGB
 
     apu_write_register(REG_NR50, reg[REG_NR50]);
     apu_write_register(REG_NR51, reg[REG_NR51]);
@@ -141,34 +172,6 @@ void apu_init() {
     apu_write_register(REG_NR42, reg[REG_NR42]);
     apu_write_register(REG_NR43, reg[REG_NR43]);
     apu_write_register(REG_NR44, reg[REG_NR44]);
-    /*
-    reg[REG_NR10] = 0x80;
-    reg[REG_NR11] = 0xBF;
-    reg[REG_NR12] = 0xF3;
-    reg[REG_NR13] = 0xFF;
-    reg[REG_NR14] = 0xBF;
-
-    reg[REG_NR21] = 0x3F;
-    reg[REG_NR22] = 0x00;
-    reg[REG_NR23] = 0xFF;
-    reg[REG_NR24] = 0xBF;
-
-    reg[REG_NR30] = 0x7F;
-    reg[REG_NR31] = 0xFF;
-    reg[REG_NR32] = 0x9F;
-    reg[REG_NR33] = 0xFF;
-    reg[REG_NR34] = 0xBF;
-
-    reg[REG_NR41] = 0xFF;
-    reg[REG_NR42] = 0x00;
-    reg[REG_NR43] = 0x00;
-    reg[REG_NR44] = 0xBF;
-
-    reg[REG_NR50] = 0x77;
-    reg[REG_NR51] = 0xF3;
-    reg[REG_NR52] = 0xF1; // F1-GB, F0-SGB
-    */
-
 }
 
 u8 apu_read_register(u8 reg_id) {
@@ -727,12 +730,12 @@ void apu_tick() {
         sample_timer -= sample_frequency;
 
         // when speeding up the emulator, only collect every Nth sample
-        if (apu_counter % frameskip != 0) return;
+        if (apu_counter % gb_frameskip != 0) return;
         // gather sample
         output = (ch1.output + ch2.output + ch3.output + ch4.output) * 2.0f;
         output = output * ((float)(vol_l + vol_r) / 14.0f);
 
-        audio_add_sample((u8)output);
+        gb_output_audio_sample((u8)output);
     }
     
 

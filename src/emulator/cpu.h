@@ -6,6 +6,7 @@
 #include "alu_binary.h"
 
 int cpu_init();
+void cpu_powerup();
 
 u8 cpu_update();
 

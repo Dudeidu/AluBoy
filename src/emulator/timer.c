@@ -17,6 +17,10 @@ u8  tima_reload_delay = 0; // emulates a timer quirk: when the timer overflows, 
 void tima_inc();
 
 void timer_init() {
+}
+
+void timer_powerup()
+{
     internal_counter  = 0xABCC;
     reg[REG_DIV]    = (internal_counter >> 8) & 0xFF;
     reg[REG_TIMA]   = 0x00;

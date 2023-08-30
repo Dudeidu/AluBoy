@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio.h"
+
 #include "emu_shared.h"
 #include "mmu.h"
 #include "cpu.h"
@@ -20,13 +22,9 @@ int cpu_initialized     = 0;
 int ppu_initialized     = 0;
 
 int cycles_this_update  = 0;
+int emu_frames          = 0;
 
-u8  cgb_mode;
 u8  save_enabled;       // if true, save at the end of this frame
-int autosave_counter;
-
-// Tests
-int emu_seconds          = 0;
 
 // Forward declarations
 int check_redraw();
@@ -38,15 +36,28 @@ int gb_init(u8* rom_buffer) {
     cpu_initialized = cpu_init(rom_buffer);
     ppu_initialized = ppu_init();
     apu_init();
+    timer_init();
 
     if (!mmu_initialized || !cpu_initialized || !ppu_initialized) {
         gb_cleanup();
         return 0;
     }
 
-    autosave_counter = 0;
+    gb_frameskip = 1;
 
     return 1;
+}
+
+void gb_powerup()
+{
+    emu_frames = 0;
+
+    mmu_powerup();
+    cpu_powerup();
+    ppu_powerup();
+    timer_powerup();
+    apu_powerup();
+
 }
 
 int gb_update(u8* inputs) {
@@ -62,18 +73,17 @@ int gb_update(u8* inputs) {
 
         cycles = cpu_update();
   
-        cycles_this_update += cycles;
+        cycles_this_update += (cycles >> double_speed);
         
         // vsync - end frame every full screen cycle to avoid tearing
         if (lcd_enabled && ly_start != reg[REG_LY] && reg[REG_LY] == 0) break;
     }
-    
+
+    emu_frames++;
     // Autosave
     if (has_battery) {
-        autosave_counter++;
-        if (autosave_counter >= AUTOSAVE_INTERVAL) {
+        if (emu_frames % AUTOSAVE_INTERVAL == 0) {
             save();
-            autosave_counter = 0;
         }
     }
 
@@ -85,7 +95,7 @@ void tick() {
     u16 clock_prev = internal_counter;
 
     // OAM DMA transfer is running
-    if (dma_transfer_flag) dma_transfer_tick();
+    if (oam_dma_transfer_flag) oam_dma_transfer_tick();
 
     input_tick();
     timer_tick();
@@ -104,6 +114,11 @@ void tick() {
 
 u8* gb_get_screen_buffer() {
     return ppu_get_pixel_buffer();
+}
+
+void gb_output_audio_sample(u8 output)
+{
+    audio_add_sample((u8)output);
 }
 
 void gb_cleanup() {

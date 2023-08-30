@@ -11,8 +11,6 @@ u8 inputs_direction = 0x0F;
 u8 inputs_action = 0x0F;
 u8 inputs_update_line;
 
-u8 input_updated = 0;      // whether the inputs were already fetched this frame
-
 // PUBLIC   -------------------------------------------------
 
 void input_update(u8* in)
@@ -66,9 +64,11 @@ void input_tick()
 void input_joypad_update()
 {
     if (input_updated || reg[REG_LY] != inputs_update_line) return;
-    //u8 dir_prev = inputs_direction;
-    //u8 action_prev = inputs_action;
-    // Updates inputs array
+
+    // Emulate D-pad behavior where you can't physically press both opposing directions at the same time
+    if (inputs[0] && inputs[1]) inputs[0] = 0;
+    if (inputs[2] && inputs[3]) inputs[2] = 0;
+
     inputs_direction = ((!inputs[3] << 3) | (!inputs[2] << 2) | (!inputs[1] << 1) | (!inputs[0] << 0));
     inputs_action = ((!inputs[7] << 3) | (!inputs[6] << 2) | (!inputs[5] << 1) | (!inputs[4] << 0));
 

@@ -196,21 +196,10 @@ static const int M_CYCLE = 4;
 extern const char* rom_file_name;
 extern const char* rom_file_path;
 
-extern u8   cgb_mode;
-
 extern u8   reg[0x100];     // Refers to Register enum
 extern u8   vram[2 * BANKSIZE_VRAM];
 extern u8   oam[0xA0];
-// INTERRUPTS
-extern u8   interrupts_enabled; // IME flag
-extern u8   stat_irq_flag;      // STAT register interrupt request
-extern u8   stat_bug;       // if true, all STAT flags are enabled for 1 cycle
-// PPU
-extern u8   lcd_mode;       // vblank/hblank/oam search/pixel rendering...
-extern u8   lcd_enabled;
-extern u8   frameskip;
-// INPUT
-extern u8   input_updated;   // whether the inputs were already fetched this frame
+
 // APU
 extern u8   apu_clock_bit;
 

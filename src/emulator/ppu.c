@@ -7,8 +7,10 @@
 
 #include "emu_shared.h"
 
-// external functions
-extern void input_joypad_update();
+#include "gb.h"
+#include "mmu.h"
+#include "input.h"
+
 
 #define PIXELS_PER_BYTE 1
 #define BITS_PER_PIXEL  8
@@ -30,18 +32,12 @@ u8  object_count;     // how many objects to read from the array
 
 // Drawing optimization
 int vblank_counter  = 0;
-u8  frameskip       = 3; // only draw the screen when vblank_counter % frameskip == 0
 u16 tm_addr_prev    = 0;
 
 u8  pal_bgp[4]      = { 0, 1, 2, 3 };
 u8  pal_obp0[4]     = { 0, 1, 2, 3 };
 u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 
-// Shared
-u8 lcd_mode = LCD_MODE_VBLANK;
-u8 lcd_enabled      = 1;
-u8 stat_irq_flag = 0;
-u8 stat_bug = 0;
 
 // Debugging
 debug_show_line_data = 0;
@@ -53,6 +49,8 @@ void draw_objects(u8 y);
 u8 search_oam(u8 y);
 void check_lyc();
 void check_stat_irq(u8 stat_int_source);
+void update_palette(u8 reg, u8 value);
+void disable_lcd();
 
 // PUBLIC --------------------------------------------------
 
@@ -69,10 +67,41 @@ int ppu_init()
         return 0;
     }
 
+    return 1;
+}
+
+void ppu_powerup()
+{
+    lcd_mode = LCD_MODE_VBLANK;
+    lcd_enabled      = 1;
     lcd_mode_next = SCANLINE_DOTS;
 
+    stat_irq_flag = 0;
+    stat_bug = 0;
+
     redraw_flag = 1;
-    return 1;
+
+    reg[REG_LCDC] = 0x91;
+    reg[REG_STAT] = 0x85;
+
+    reg[REG_SCY] = 0x00;
+    reg[REG_SCX] = 0x00;
+    reg[REG_LY] = 0x00;
+    reg[REG_LYC] = 0x00;
+
+    reg[REG_DMA] = 0xFF;
+    reg[REG_BGP] = 0xFC;
+    reg[REG_OBP0] = 0xFF;
+    reg[REG_OBP1] = 0xFF;
+
+    reg[REG_WY] = 0x00;
+    reg[REG_WX] = 0x00;
+
+    reg[REG_BGPI] = 0xFF;
+    reg[REG_BGPD] = 0xFF;
+    reg[REG_OBPI] = 0xFF;
+    reg[REG_OBPD] = 0xFF;
+
 }
 
 // Used for passing the pixel buffer to GL
@@ -81,57 +110,115 @@ u8* ppu_get_pixel_buffer()
     return lcd_buffer;
 }
 
-// assigns gray shades to the color indexes
-void ppu_update_palette(u8 reg, u8 value) {
-    u8* palette;
-    switch (reg) {
-        case REG_BGP:   palette = pal_bgp; break;
-        case REG_OBP0:  palette = pal_obp0; break;
-        case REG_OBP1:  palette = pal_obp1; break;
-        default: return;
-    }
-    for (int i = 0; i < 4; i++) {
-        palette[i] = (value >> (i * 2)) & 0x3;
-    }
-}
-
-void ppu_clear_screen() {
-    int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
-
-    /*
-    when the LCD is turned off: 
-    you automatically enter HBLANK, 
-    clear bits 0 and 1 (background enable and object enable) of the LCDC register 
-    set LY to 0.
-    */
-    //printf("lcd disabled\n");
-
-    RESET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE);
-    RESET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE);
-    reg[REG_LY] = 0;
-    vblank_counter = 0;
-    scanline_counter = 0;
-    window_counter = 0;
-
-    
-    // request hblank interrupt if enabled
-    check_stat_irq(STAT_INT_HBLANK);
-    
-    reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
-    
-    lcd_mode = LCD_MODE_HBLANK;
-    lcd_mode_next = SCANLINE_DOTS;
-
-    memset(lcd_buffer, MEM_ROM_0, buffer_size);
-}
-
 // Whether the screen needs to be redrawn
 u8 ppu_get_redraw_flag() {
-    return redraw_flag && (vblank_counter % frameskip == 0);
+    return redraw_flag && (vblank_counter % gb_frameskip == 0);
 }
 
 void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
+}
+
+u8 ppu_read_register(u8 reg_id) {
+    // handles special cases
+    switch (reg_id) {
+        case REG_OBPD:
+            if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+            return reg[REG_OBPD];
+
+        default:
+            return reg[reg_id];
+    }
+}
+
+void ppu_write_register(u8 reg_id, u8 value) {
+    // handles special cases
+    switch (reg_id) {
+        case REG_LCDC:
+            if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
+                printf("illegal LCD disable\n");
+            }
+            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
+            {
+                disable_lcd();
+                lcd_enabled = 0;
+            }
+            else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
+                //printf("lcd enabled\n");
+                lcd_enabled = 1;
+                check_lyc();
+                check_stat_irq(0);
+            }
+            reg[REG_LCDC] = value;
+            break;
+        case REG_STAT:
+            // STAT irq blocking / bug
+            // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
+            // call your STAT IRQ poll function, then set STAT enable flags to their true values.
+                            
+            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
+            // so it does not block if Mode 0 is enabled as well.
+            reg[REG_STAT] = value ;
+            if (lcd_enabled) {
+                if (!cgb_mode) stat_bug = 1;
+                check_stat_irq(0);
+            }
+            break;
+        case REG_SCX:
+            if (value == 32) {
+                //debug_show_tracelog = 1;
+            }
+            reg[REG_SCX] = value;
+            break;
+        case REG_LY: 
+            if (lcd_enabled) reg[REG_LY] = 0;
+            break; // read only
+        case REG_LYC:
+            reg[REG_LYC] = value;
+
+            if (lcd_enabled) {
+                check_lyc();
+                check_stat_irq(0);
+            }
+            break;
+        case REG_DMA:
+            // Source:      $XX00-$XX9F   ;XX = $00 to $DF
+            // Destination: $FE00-$FE9F
+            reg[REG_DMA] = value;
+            oam_dma_transfer_flag = 1;
+            break;
+        case REG_BGP:
+            update_palette(REG_BGP, value);
+            break;
+        case REG_OBP0:
+            update_palette(REG_OBP0, value);
+            break;
+        case REG_OBP1:
+            update_palette(REG_OBP1, value);
+            break;
+        case REG_OBPD:
+            if (lcd_mode != LCD_MODE_VRAM) {
+                reg[REG_OBPD] = value;
+            }
+            break;
+        default:
+            reg[reg_id] = value;   // Convert to range 0-255
+            break;
+    }
+}
+
+void oam_dma_transfer_tick() {
+    oam_dma_access_flag = 1;
+    u8 t_u8 = read((reg[REG_DMA] << 8) | oam_dma_index);
+    oam_dma_access_flag = 0;
+
+    oam[oam_dma_index] = t_u8;
+    oam_dma_index++;
+
+    if (oam_dma_index > 0x9F) {
+        oam_dma_index = 0;
+        oam_dma_transfer_flag = 0;
+    }
 }
 
 void ppu_tick()
@@ -166,7 +253,7 @@ void ppu_tick()
             // Draw scanline //////////////////////////////
             object_count = search_oam(reg[REG_LY]);
 
-            if (lcd_enabled && vblank_counter % frameskip == 0) {
+            if (lcd_enabled && vblank_counter % gb_frameskip == 0) {
                 draw_scanline(reg[REG_LY]);
             }
             // Move to a new scanline
@@ -246,6 +333,49 @@ void ppu_cleanup()
 }
 
 // PRIVATE --------------------------------------------------
+
+// assigns gray shades to the color indexes
+void update_palette(u8 reg, u8 value) {
+    u8* palette;
+    switch (reg) {
+        case REG_BGP:   palette = pal_bgp; break;
+        case REG_OBP0:  palette = pal_obp0; break;
+        case REG_OBP1:  palette = pal_obp1; break;
+        default: return;
+    }
+    for (int i = 0; i < 4; i++) {
+        palette[i] = (value >> (i * 2)) & 0x3;
+    }
+}
+
+void disable_lcd() {
+    int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
+
+    /*
+    when the LCD is turned off: 
+    automatically enter HBLANK, 
+    clear bits 0 and 1 (background enable and object enable) of the LCDC register 
+    set LY to 0.
+    */
+
+    RESET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE);
+    RESET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE);
+    reg[REG_LY] = 0;
+    vblank_counter = 0;
+    scanline_counter = 0;
+    window_counter = 0;
+
+    
+    // request hblank interrupt if enabled
+    check_stat_irq(STAT_INT_HBLANK);
+    
+    reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
+    
+    lcd_mode = LCD_MODE_HBLANK;
+    lcd_mode_next = SCANLINE_DOTS;
+
+    memset(lcd_buffer, MEM_ROM_0, buffer_size);
+}
 
 // Custom comparison function for sorting objects
 int compare_object_by_priority(const void* a, const void* b) {

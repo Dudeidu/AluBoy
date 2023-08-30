@@ -5,8 +5,12 @@
 
 #include "alu_binary.h"
 
+u8  cgb_mode;
+u8  gb_frameskip; // only draw the screen when vblank_counter % gb_frameskip == 0
+
 // Initialize emulator components
 int gb_init(u8* rom_buffer);
+void gb_powerup();
 
 // Advance the emulator by one frame, taking in the input data from the device
 // returns 1 if screen needs redrawing, 0 otherwise.
@@ -17,6 +21,8 @@ void tick();
 
 // Fetch a pointer to the PPU's screen buffer
 u8* gb_get_screen_buffer();
+
+void gb_output_audio_sample(u8 output);
 
 void gb_cleanup();
 

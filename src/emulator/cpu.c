@@ -12,16 +12,7 @@
 #include "emu_shared.h"
 #include "gb.h"
 #include "mmu.h"
-#include "timer.h"
-
-// external functions
-
-extern void ppu_update_palette(u8 reg, u8 value);
-extern void ppu_clear_screen();
-extern void check_stat_irq(u8 vblank_start);
-extern void check_lyc();
-
-extern void apu_frame_sequencer_update();
+#include "ppu.h"    // lcd_mode
 
 
 // Determines how many CPU cycles each instruction takes to perform
@@ -48,7 +39,6 @@ u8 op_cycles_lut[]  = {
 u8  reg[0x100];     // Refers to Register enum
 u8  vram[2 * BANKSIZE_VRAM];
 u8  oam[0xA0];
-u8  interrupts_enabled; // IME flag
 
 // Hardware registers
 u8  A;              // Accumulator
@@ -68,6 +58,7 @@ u8  hram[0x80];
 
 u8  halted;
 u8  ei_flag;
+u8  interrupts_enabled; // IME flag
 
 // Tests
 int counter = 1;
@@ -254,10 +245,8 @@ void test_bit(u8* a, u8 b) {
 }
 
 
-int power_up()
+void cpu_powerup()
 {
-    // TODO - move the power-up function to gb and have each component handle its own power-up routine
-    
     // Reset registers to their default values (DMG)
     A = 0x01;
     F_Z = 1;
@@ -289,53 +278,7 @@ int power_up()
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
 
-    timer_init();
-
-    apu_clock_bit   = 12;
-
-    reg[REG_IF]     = 0xE1;
-
-    reg[REG_NR10] = 0x80;
-    reg[REG_NR11] = 0xBF;
-    reg[REG_NR12] = 0xF3;
-    reg[REG_NR13] = 0xFF;
-    reg[REG_NR14] = 0xBF;
-
-    reg[REG_NR21] = 0x3F;
-    reg[REG_NR22] = 0x00;
-    reg[REG_NR23] = 0xFF;
-    reg[REG_NR24] = 0xBF;
-
-    reg[REG_NR30] = 0x7F;
-    reg[REG_NR31] = 0xFF;
-    reg[REG_NR32] = 0x9F;
-    reg[REG_NR33] = 0xFF;
-    reg[REG_NR34] = 0xBF;
-
-    reg[REG_NR41] = 0xFF;
-    reg[REG_NR42] = 0x00;
-    reg[REG_NR43] = 0x00;
-    reg[REG_NR44] = 0xBF;
-
-    reg[REG_NR50] = 0x77;
-    reg[REG_NR51] = 0xF3;
-    reg[REG_NR52] = 0xF1; // F1-GB, F0-SGB
-
-    reg[REG_LCDC] = 0x91;
-    reg[REG_STAT] = 0x85;
-
-    reg[REG_SCY] = 0x00;
-    reg[REG_SCX] = 0x00;
-    reg[REG_LY] = 0x00;
-    reg[REG_LYC] = 0x00;
-
-    reg[REG_DMA] = 0xFF;
-    reg[REG_BGP] = 0xFC;
-    reg[REG_OBP0] = 0xFF;
-    reg[REG_OBP1] = 0xFF;
-
-    reg[REG_WY] = 0x00;
-    reg[REG_WX] = 0x00;
+    reg[REG_IF] = 0xE1;
 
     reg[REG_KEY1] = 0xFF;
 
@@ -348,19 +291,12 @@ int power_up()
 
     reg[REG_RP] = 0xFF;
 
-    reg[REG_BGPI] = 0xFF;
-    reg[REG_BGPD] = 0xFF;
-    reg[REG_OBPI] = 0xFF;
-    reg[REG_OBPD] = 0xFF;
-
     reg[REG_SVBK] = 0x00;
 
     reg[REG_IE] = 0x00;
-    return 0;
 }
 int cpu_init()
 {
-    power_up();
 
     return 1;
 }
@@ -373,11 +309,6 @@ u8 cpu_read_register(u8 reg_id) {
             return reg[REG_P1];
         case REG_SB:
             return 0xFF;
-
-        // TODO move this to PPU
-        case REG_OBPD:
-            if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
-            return reg[REG_OBPD];
 
         default:
             return reg[reg_id];
@@ -396,68 +327,6 @@ void cpu_write_register(u8 reg_id, u8 value) {
         case 0x50: // BOOT register (read only)
             break;
 
-        // TODO move these to PPU    
-        case REG_LCDC:
-            if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
-                printf("illegal LCD disable\n");
-            }
-            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
-            {
-                ppu_clear_screen();
-                lcd_enabled = 0;
-            }
-            else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
-                //printf("lcd enabled\n");
-                lcd_enabled = 1;
-                check_lyc();
-                check_stat_irq(0);
-            }
-            reg[REG_LCDC] = value;
-            break;
-        case REG_STAT:
-            // STAT irq blocking / bug
-            // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
-            // call your STAT IRQ poll function, then set STAT enable flags to their true values.
-                            
-            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
-            // so it does not block if Mode 0 is enabled as well.
-            reg[REG_STAT] = value ;
-            if (lcd_enabled) {
-                if (!cgb_mode) stat_bug = 1;
-                check_stat_irq(0);
-            }
-            break;
-        case REG_SCX:
-            if (value == 32) {
-                //debug_show_tracelog = 1;
-            }
-            reg[REG_SCX] = value;
-            break;
-        case REG_LY: 
-            if (lcd_enabled) reg[REG_LY] = 0;
-            break; // read only
-        case REG_LYC:
-            reg[REG_LYC] = value;
-
-            if (lcd_enabled) {
-                check_lyc();
-                check_stat_irq(0);
-            }
-            break;
-        case REG_BGP:
-            ppu_update_palette(REG_BGP, value);
-            break;
-        case REG_OBP0:
-            ppu_update_palette(REG_OBP0, value);
-            break;
-        case REG_OBP1:
-            ppu_update_palette(REG_OBP1, value);
-            break;
-        case REG_OBPD:
-            if (lcd_mode != LCD_MODE_VRAM) {
-                reg[REG_OBPD] = value;
-            }
-            break;
         default:
             reg[reg_id] = value;   // Convert to range 0-255
             break;
@@ -564,9 +433,9 @@ u8 cpu_update()
     if (debug_show_tracelog) {
         if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
         {
-            printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X IDIV=%03d TIMA=%02X\n",
+            printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X TIMA=%02X\n",
                 counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
-                BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], internal_counter & 0xFF, reg[REG_TIMA]);
+                BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], reg[REG_TIMA]);
             /*
             printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
                 counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
@@ -590,7 +459,7 @@ u8 cpu_update()
         interrupts_enabled = 1;
     }
 
-    return (cycles >> double_speed);
+    return (cycles);
 }
 
 

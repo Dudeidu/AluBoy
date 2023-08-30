@@ -34,10 +34,6 @@ u8  rtc_latch_flag;
 u8  rtc_latch_reg;
 u8  rtc_select_reg; // Indicated which RTC register is currently mapped into memory at A000 - BFFF
 
-u8  dma_transfer_flag; // whether a dma transfer is currently running
-u8  dma_access_flag; // allows bypassing the DMA memory blocking when its the DMA itself doing accessing the memory
-u8  dma_index;      // 0x00-0x9F
-
 // Header information
 unsigned char title[17]; // 16 + '\0'
 unsigned char licensee_code_new[2];
@@ -126,7 +122,6 @@ int mmu_init(u8* rom_buffer) {
         default:    eram_banks = 0;  break;
     }
 
-    // TODO - load save file if exists
     if (eram != NULL) {
         free(eram);
         eram = NULL;
@@ -164,10 +159,13 @@ int mmu_init(u8* rom_buffer) {
     checksum_header     = rom[ROM_HEADER_CHECKSUM];
     checksum_global     = rom[ROM_GLOBAL_CHECKSUM] << 8 || rom[ROM_GLOBAL_CHECKSUM + 1];
 
-    printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n", cart_type, mbc, rom_banks, eram_banks);
+    printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n\n", cart_type, mbc, rom_banks, eram_banks);
 
-    printf("\n");
+    return 1;
+}
 
+void mmu_powerup()
+{
     // load save file if exists
     if (has_battery) {
         size_t buffer_size = (mbc == 2) ? 512 : sizeof(u8) * eram_banks * BANKSIZE_ERAM;
@@ -191,26 +189,8 @@ int mmu_init(u8* rom_buffer) {
             printf("save loaded from disk.\n");
         }
     }
-
-    // Initialize other variables
-    dma_transfer_flag = 0;
-
-    return 1;
 }
 
-void dma_transfer_tick() {
-    dma_access_flag = 1;
-    u8 t_u8 = read((reg[REG_DMA] << 8) | dma_index);
-    dma_access_flag = 0;
-
-    oam[dma_index] = t_u8;
-    dma_index++;
-
-    if (dma_index > 0x9F) {
-        dma_index = 0;
-        dma_transfer_flag = 0;
-    }
-}
 
 // Dump ERAM to [.sav] file
 void save() {
@@ -236,7 +216,7 @@ u8 read(u16 addr)
 {
     u8 msb = (u8)(addr >> 12);
 
-    if (dma_transfer_flag && (addr != (0xFF00 | REG_DMA)) && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
+    if (oam_dma_transfer_flag && (addr != (0xFF00 | REG_DMA)) && !oam_dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) 
         return 0xFF;
 
     switch (msb) {
@@ -280,9 +260,13 @@ u8 read(u16 addr)
                 // APU registers
                 if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
                     return apu_read_register(reg_id);
+                // PPU registers
+                else if ((reg_id >= REG_LCDC && reg_id <= REG_WX) || (reg_id >= REG_BGPI && reg_id <= REG_OPRI))
+                    return ppu_read_register(reg_id);
                 // Timer registers
                 else if (reg_id >= REG_DIV && reg_id <= REG_TAC)
                     return timer_read_register(reg_id);
+                // CPU registers
                 else
                     return cpu_read_register(reg_id);
             }
@@ -298,7 +282,7 @@ void write(u16 addr, u8 value)
     // TODO - I/O register writing rules
     u8 msb = (u8)(addr >> 12);
 
-    if ((addr != (0xFF00 | REG_DMA)) && dma_transfer_flag && !dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) {
+    if ((addr != (0xFF00 | REG_DMA)) && oam_dma_transfer_flag && !oam_dma_access_flag && (addr < MEM_HRAM || addr >= MEM_IE)) {
         tick();
         return;
     }
@@ -509,13 +493,9 @@ void write(u16 addr, u8 value)
                     // Timer registers
                     else if (reg_id >= REG_DIV && reg_id <= REG_TAC)
                         timer_write_register(reg_id, value);
-                    // DMA transfer - value specifies the transfer source address divided by $100
-                    else if (reg_id == REG_DMA) {
-                        // Source:      $XX00-$XX9F   ;XX = $00 to $DF
-                        // Destination: $FE00-$FE9F
-                        reg[REG_DMA] = value;
-                        dma_transfer_flag = 1;
-                    }
+                    // PPU registers
+                    else if ((reg_id >= REG_LCDC && reg_id <= REG_WX) || (reg_id >= REG_BGPI && reg_id <= REG_OPRI))
+                        ppu_write_register(reg_id, value);
                     // CPU registers
                     else
                         cpu_write_register(reg_id, value);

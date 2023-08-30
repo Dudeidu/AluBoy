@@ -27,10 +27,10 @@ int     gb_initialized      = 0;
 
 int     window_scale = 4;
 int     fps = 60;
-double  tick_rate = 1000.0 / 180; // Milliseconds per frame
+double  tick_rate; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "pokemon red";
+const char* rom_file_name = "legend of zelda";
 const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
 /* 
@@ -112,7 +112,7 @@ int application_init(const char* title) {
         application_cleanup();
         return -1;
     }
-    
+
     // Initialize emulator
     gb_initialized = gb_init(rom_buffer);
     if (!gb_initialized) {
@@ -120,6 +120,9 @@ int application_init(const char* title) {
         application_cleanup();
         return -1;
     }
+    gb_powerup();
+
+    tick_rate = 1000.0 / (fps * gb_frameskip);
 
     return 0;
 }
@@ -171,7 +174,18 @@ void application_update() {
             }
             break;
             case SDL_KEYDOWN:
-                //
+                switch (window_event.key.keysym.sym) {
+                    // Restart emulator
+                    case SDLK_r:
+                        gb_powerup();
+                        break;
+                    // Turbo mode
+                    case SDLK_t:
+                        gb_frameskip = (gb_frameskip == 1) ? 3 : 1;
+                        // adjust tick rate to the new speed
+                        tick_rate = 1000.0 / (fps * gb_frameskip);
+                        break;
+                }
                 break;
             }
         }

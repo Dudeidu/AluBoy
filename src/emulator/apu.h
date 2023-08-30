@@ -7,6 +7,8 @@
 
 
 void apu_init();
+void apu_powerup();
+
 u8 apu_read_register(u8 reg_id);
 int apu_write_register(u8 reg_id, u8 value);
 void apu_frame_sequencer_update();
