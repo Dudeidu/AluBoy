@@ -35,8 +35,8 @@ int gb_init(u8* rom_buffer) {
     mmu_initialized = mmu_init(rom_buffer);
     cpu_initialized = cpu_init(rom_buffer);
     ppu_initialized = ppu_init();
-    apu_init();
     timer_init();
+    apu_init();
 
     if (!mmu_initialized || !cpu_initialized || !ppu_initialized) {
         gb_cleanup();
@@ -54,8 +54,8 @@ void gb_powerup()
 
     mmu_powerup();
     cpu_powerup();
-    ppu_powerup();
     timer_powerup();
+    ppu_powerup();
     apu_powerup();
 
 }
@@ -109,7 +109,7 @@ void tick() {
     }
     apu_tick();
     
-    if (stat_bug) stat_bug = 0;
+    //if (stat_bug) stat_bug = 0;
 }
 
 u8* gb_get_screen_buffer() {

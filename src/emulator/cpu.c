@@ -14,6 +14,12 @@
 #include "mmu.h"
 #include "ppu.h"    // lcd_mode
 
+typedef struct Flags {
+    u8 Z; // Zero flag
+    u8 N; // Subtract flag
+    u8 H; // Half carry flag
+    u8 C; // Carry flag 
+} Flags;
 
 // Determines how many CPU cycles each instruction takes to perform
 u8 op_cycles_lut[]  = {
@@ -41,11 +47,8 @@ u8  vram[2 * BANKSIZE_VRAM];
 u8  oam[0xA0];
 
 // Hardware registers
-u8  A;              // Accumulator
-u8  F_Z;            // Zero flag
-u8  F_N;            // Subtract flag
-u8  F_H;            // Half carry flag
-u8  F_C;            // Carry flag 
+u8  A;   // Accumulator
+Flags F;           
 BytePair BC;
 BytePair DE;
 BytePair HL;
@@ -61,6 +64,7 @@ u8  ei_flag;
 u8  interrupts_enabled; // IME flag
 
 // Tests
+
 int counter = 1;
 u8  debug_show_tracelog = 0;
 int debug_tracelog_interval = 1;
@@ -68,180 +72,223 @@ int debug_tracelog_start = 0;
 
 
 // Forward declarations
+
 u8 do_interrupts();
 u8 execute_instruction(u8 op);
 u8 execute_cb(u8 op);
 
 // Arithmetic
-void inc_u8(u8* a) {
-    F_H = HALF_CARRY_U8_ADD(*a, 1);
-    F_N = 0;
+
+void inc_u8(u8* a, Flags* flags) {
+    flags->H = HALF_CARRY_U8_ADD(*a, 1);
+    
     (*a)++;
-    F_Z = (*a == 0);
+
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
 }
-void dec_u8(u8* a) {
-    F_H = HALF_CARRY_U8_SUB(*a, 1);
-    F_N = 1;
+void dec_u8(u8* a, Flags* flags) {
+    flags->H = HALF_CARRY_U8_SUB(*a, 1);
+    
     (*a)--;
-    F_Z = (*a == 0);
+
+    // update other flags
+    flags->N = 1;
+    flags->Z = (*a == 0);
 }
-void add_u8(u8* a, u8 b) {
-    F_H = HALF_CARRY_U8_ADD(*a, b);
-    F_C = CARRY_ADD(*a, b);
-    F_N = 0;
+void add_u8(u8* a, u8 b, Flags* flags) {
+    flags->H = HALF_CARRY_U8_ADD(*a, b);
+    flags->C = CARRY_ADD(*a, b);
+    
     (*a) += b;
-    F_Z = (*a == 0);
+
+    // update other flags
+    flags->N = 0;
+    flags->Z = (*a == 0);
 }
-void adc_u8(u8* a, u8 b) {
-    u8 carry = F_C;  // Store the carry flag
-    int sum = A + b + carry;  // Calculate the sum
+void adc_u8(u8* a, u8 b, Flags* flags) {
+    u8 carry = flags->C;        // Store the carry flag
+    int sum = *a + b + carry;   // Calculate the sum
     u8 result = (u8)sum;
 
-    F_H = (((A & 0xF) + (b & 0xF) + carry) > 0xF);
-    F_C = (sum > 0xFF);  // Update the carry flag
-    A = result;  // Store the result in *a
-    F_N = 0;  // Set the subtraction flag
-    F_Z = (A == 0);
+    flags->H = (((*a & 0xF) + (b & 0xF) + carry) > 0xF);
+    flags->C = (sum > 0xFF);    // Update the carry flag
+    
+    (*a) = result;              // Store the result in *a
+
+    // update other flags
+    flags->N = 0;               // Set the subtraction flag
+    flags->Z = (A == 0);
 }
-void add_u16(u16* a, u16 b) {
-    F_H = HALF_CARRY_U16_ADD(*a, b);
-    F_C = CARRY_ADD_U16(*a, b);
-    F_N = 0;
-    (*a) += b;
+void add_u16(u16* aa, u16 bb, Flags* flags) {
+    flags->H = HALF_CARRY_U16_ADD(*aa, bb);
+    flags->C = CARRY_ADD_U16(*aa, bb);
+    
+    (*aa) += bb;
+
+    // update other flags
+    flags->N = 0;
 }
-void sub_u8(u8 b) {
-    F_H = HALF_CARRY_U8_SUB(A, b);
-    F_C = CARRY_SUB(A, b);
-    F_N = 1;
-    A -= b;
-    F_Z = (A == 0);
+void sub_u8(u8* a, u8 b, Flags* flags) {
+    flags->H = HALF_CARRY_U8_SUB(*a, b);
+    flags->C = CARRY_SUB(*a, b);
+    
+    (*a) -= b;
+
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 1;
 }
-void sbc_u8(u8 b) {
-    u8 carry = F_C;  // Store the carry flag
-    int diff = A - b - carry;  // Calculate the difference with borrow
+void sbc_u8(u8* a, u8 b, Flags* flags) {
+    u8 carry = flags->C;  // Store the carry flag
+    int diff = *a - b - carry;  // Calculate the difference with borrow
     u8 result = (u8)diff;
 
-    F_H = (((A & 0xF) - (b & 0xF) - carry) < 0);
-    F_C = (diff < 0);  // Update the carry flag
-    A = result;  // Store the result in *a
-    F_N = 1;  // Set the subtraction flag
-    F_Z = (A == 0);
+    flags->H = (((*a & 0xF) - (b & 0xF) - carry) < 0);
+    flags->C = (diff < 0);  // Update the carry flag
+    
+    (*a) = result;  // Store the result in *a
+    
+    // update other flags
+    flags->N = 1;  // Set the subtraction flag
+    flags->Z = (*a == 0);
 }
-void cp_u8(u8 b) {
+void cp_u8(u8* a, u8 b, Flags* flags) {
     // Same as sub, but discards the results and only updates the flags
-    F_H = HALF_CARRY_U8_SUB(A, b);
-    F_C = CARRY_SUB(A, b);
-    F_N = 1;
-    F_Z = (A - b == 0);
+    flags->H = HALF_CARRY_U8_SUB(*a, b);
+    flags->C = CARRY_SUB(*a, b);
+    flags->N = 1;
+    flags->Z = (*a - b == 0);
 }
-void and_u8(u8 b) {
-    F_H = 1;
-    F_C = 0;
-    F_N = 0;
-    A &= b;
-    F_Z = (A == 0);
+void and_u8(u8* a, u8 b, Flags* flags) {
+    (*a) &= b;
+
+    // update flags
+    flags->Z = (*a == 0);
+    flags->H = 1;
+    flags->C = 0;
+    flags->N = 0;
 }
-void xor_u8(u8 b) {
-    F_H = 0;
-    F_C = 0;
-    F_N = 0;
-    A ^= b;
-    F_Z = (A == 0);
+void xor_u8(u8* a, u8 b, Flags* flags) {
+    (*a) ^= b;
+
+    // update flags
+    flags->Z = (*a == 0);
+    flags->H = 0;
+    flags->C = 0;
+    flags->N = 0;
 }
-void or_u8(u8 b) {
-    F_H = 0;
-    F_C = 0;
-    F_N = 0;
-    A |= b;
-    F_Z = (A == 0);
+void or_u8(u8* a, u8 b, Flags* flags) {
+    (*a) |= b;
+
+    // update flags
+    flags->Z = (*a == 0);
+    flags->H = 0;
+    flags->C = 0;
+    flags->N = 0;
 }
 
 // Rotates & Shifts 
-void rlc(u8* a) {
+
+void rlc(u8* a, Flags* flags) {
     // rotate left carry
-    F_C = GET_BIT(*a, 7);
+    flags->C = GET_BIT(*a, 7);
     *a = ROTATE_LEFT(*a, 1, 8);
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void rrc(u8* a) {
+void rrc(u8* a, Flags* flags) {
     // rotate right carry
-    F_C = GET_BIT(*a, 0);
+    flags->C = GET_BIT(*a, 0);
     *a = ROTATE_RIGHT(*a, 1, 8);
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void rl(u8* a) {
+void rl(u8* a, Flags* flags) {
     // rotate left
-    u8 temp = F_C;
-    F_C = GET_BIT(*a, 7);
+    u8 temp = flags->C;
+    flags->C = GET_BIT(*a, 7);
     *a = (*a << 1) & 0xFF;
     if (temp) SET_BIT(*a, 0);
 
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void rr(u8* a) {
+void rr(u8* a, Flags* flags) {
     // rotate right
-    u8 temp = F_C;
-    F_C = GET_BIT(*a, 0);
-    *a = (*a >> 1) & 0xFF;
-    if (temp) SET_BIT(*a, 7);
+    u8 temp = flags->C;
+    flags->C = GET_BIT(*a, 0);  // store lsb in carry flag
+    *a = (*a >> 1) & 0xFF;      // right shift
+    if (temp) SET_BIT(*a, 7);   // set msb from old carry
 
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void sla(u8* a) {
+void sla(u8* a, Flags* flags) {
     // shift left arithmetic
     // left shift into carry, conserving the msb
-    F_C = GET_BIT(*a, 7);
-    *a = (*a << 1) & 0xFF;
+    flags->C = GET_BIT(*a, 7);  // store msb in carry flag
+    *a = (*a << 1) & 0xFF;      // left shift
 
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void sra(u8* a) {
+void sra(u8* a, Flags* flags) {
     // shift right arithmetic
     // right shift into carry, conserving the msb
-    u8 temp = GET_BIT(*a, 7);
-    F_C = GET_BIT(*a, 0);
-    *a = (*a >> 1) & 0xFF;
+    u8 temp = GET_BIT(*a, 7);   // conserve most significant bit
+    flags->C = GET_BIT(*a, 0);  // store lsb in carry flag
+    *a = (*a >> 1) & 0xFF;      // shift right
     // restore msb
     if (temp)   SET_BIT(*a, 7);
     else        RESET_BIT(*a, 7);
 
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+    // update other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void srl(u8* a) {
+void srl(u8* a, Flags* flags) {
     // shift right logical
     // right shift into carry, msb set to 0
-    F_C = GET_BIT(*a, 0);
-    *a = (*a >> 1) & 0xFF;
+    flags->C = GET_BIT(*a, 0);  // load lsb to carry
+    *a = (*a >> 1) & 0xFF;      // shift right
     // msb set to 0
     RESET_BIT(*a, 7);
 
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
+    // set other flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
 }
-void swap(u8* a) {
+void swap(u8* a, Flags* flags) {
+    // swap low and high nibbles (4 bits)
     *a = ((*a & 0xF) << 4) | (*a >> 4);
-    F_Z = (*a == 0);
-    F_N = 0;
-    F_H = 0;
-    F_C = 0;
+    
+    // update flags
+    flags->Z = (*a == 0);
+    flags->N = 0;
+    flags->H = 0;
+    flags->C = 0;
 }
-void test_bit(u8* a, u8 b) {
-    F_Z = !GET_BIT(*a, b);
-    F_N = 0;
-    F_H = 1;
+void test_bit(u8* a, u8 b, Flags* flags) {
+    // update the flags depending on the bit value
+    flags->Z = !GET_BIT(*a, b);
+    flags->N = 0;
+    flags->H = 1;
 }
 
 
@@ -249,16 +296,17 @@ void cpu_powerup()
 {
     // Reset registers to their default values (DMG)
     A = 0x01;
-    F_Z = 1;
-    F_N = 0;
+
+    F.Z = 1;
+    F.N = 0;
     if (checksum_header == 0)
     {
-        F_H = 0;
-        F_C = 0;
+        F.H = 0;
+        F.C = 0;
     }
     else {
-        F_H = 1;
-        F_C = 1;
+        F.H = 1;
+        F.C = 1;
     }
 
     BC.full = 0x0013;
@@ -339,7 +387,7 @@ u8 cpu_read_memory(u16 addr) {
         case 0x8:
         case 0x9:
             // VRAM
-            if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+            //if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
 
             if (cgb_mode)   return vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
             else            return vram[addr & 0x1FFF];
@@ -356,17 +404,17 @@ u8 cpu_read_memory(u16 addr) {
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
+                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
 
                 return oam[addr - MEM_OAM]; // Convert to range 0-159
             }
             // Unusable area
             else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
-                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
-                {
-                    // TODO OAM corruption
-                    return 0xFF;
-                }
+                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
+                //{
+                //    // TODO OAM corruption
+                //    return 0xFF;
+                //}
                 return 0x00;
             }
             // High RAM
@@ -388,10 +436,13 @@ void cpu_write_memory(u16 addr, u8 value) {
         case 0x8:
         case 0x9:
             // VRAM
-            if (lcd_mode != LCD_MODE_VRAM) {
+            //if (lcd_mode != LCD_MODE_VRAM) {
                 if (cgb_mode)   vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
                 else            vram[addr & 0x1FFF] = value;
-            }
+            //}
+            //else {
+            //    printf("attempting to write to VRAM on LCD_MODE_VRAM! LY=%d\n", reg[REG_LY]);
+            //}
             break;
         case 0xC:
         case 0xE:
@@ -407,9 +458,9 @@ void cpu_write_memory(u16 addr, u8 value) {
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                if (lcd_mode != LCD_MODE_VRAM && lcd_mode != LCD_MODE_OAM) {
+                //if (lcd_mode != LCD_MODE_VRAM && lcd_mode != LCD_MODE_OAM) {
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
-                }
+                //}
             }
             // High RAM
             else if (addr >= MEM_HRAM && addr < MEM_IE) {
@@ -434,13 +485,8 @@ u8 cpu_update()
         if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
         {
             printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X TIMA=%02X\n",
-                counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)),
+                counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F.Z << 7) | (F.N << 6) | (F.H << 5) | (F.C << 4)),
                 BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], reg[REG_TIMA]);
-            /*
-            printf("%d A: %02X F: %02X B: %02X C: %02X D: %02X E: %02X H: %02X L: %02X SP: %04X PC: 00:%04X (%02X %02X %02X %02X)\n",
-                counter, A, ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4)), BC.high, BC.low, DE.high, DE.low, HL.high, HL.low,
-                SP.full, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3));
-                */
         }
         counter++;
     }
@@ -496,7 +542,7 @@ u8 do_interrupts() {
                         PC = INT_VEC_VBLANK; break; //printf("vb\n"); break;
                     case 1: 
                         PC = INT_VEC_STAT; 
-                        //stat_irq_flag = 0; 
+                        //check_stat_irq(0);
                         break; //printf("st\n");break;
                     case 2: PC = INT_VEC_TIMER;  break; //printf("tm\n");break;
                     case 3: PC = INT_VEC_SERIAL; break; //printf("sr\n");break;
@@ -532,412 +578,412 @@ u8 execute_cb(u8 op) {
     switch (op)
     {
         case 0x00: // RLC B
-            rlc(&BC.high);
+            rlc(&BC.high, &F);
             break;
         case 0x01: // RLC C
-            rlc(&BC.low);
+            rlc(&BC.low, &F);
             break;
         case 0x02: // RLC D
-            rlc(&DE.high);
+            rlc(&DE.high, &F);
             break;
         case 0x03: // RLC E
-            rlc(&DE.low);
+            rlc(&DE.low, &F);
             break;
         case 0x04: // RLC H
-            rlc(&HL.high);
+            rlc(&HL.high, &F);
             break;
         case 0x05: // RLC L
-            rlc(&HL.low);
+            rlc(&HL.low, &F);
             break;
         case 0x06: // RLC (HL)
             t_u8 = read(HL.full); tick();
-            rlc(&t_u8);
+            rlc(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x07: // RLC A
-            rlc(&A);
+            rlc(&A, &F);
             break;
         case 0x08: // RRC B
-            rrc(&BC.high);
+            rrc(&BC.high, &F);
             break;
         case 0x09: // RRC C
-            rrc(&BC.low);
+            rrc(&BC.low, &F);
             break;
         case 0x0A: // RRC D
-            rrc(&DE.high);
+            rrc(&DE.high, &F);
             break;
         case 0x0B: // RRC E
-            rrc(&DE.low);
+            rrc(&DE.low, &F);
             break;
         case 0x0C: // RRC H
-            rrc(&HL.high);
+            rrc(&HL.high, &F);
             break;
         case 0x0D: // RRC L
-            rrc(&HL.low);
+            rrc(&HL.low, &F);
             break;
         case 0x0E: // RRC (HL)
             t_u8 = read(HL.full); tick();
-            rrc(&t_u8);
+            rrc(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x0F: // RRC A
-            rrc(&A);
+            rrc(&A, &F);
             break;
         case 0x10: // RL B
-            rl(&BC.high);
+            rl(&BC.high, &F);
             break;
         case 0x11: // RL C
-            rl(&BC.low);
+            rl(&BC.low, &F);
             break;
         case 0x12: // RL D
-            rl(&DE.high);
+            rl(&DE.high, &F);
             break;
         case 0x13: // RL E
-            rl(&DE.low);
+            rl(&DE.low, &F);
             break;
         case 0x14: // RL H
-            rl(&HL.high);
+            rl(&HL.high, &F);
             break;
         case 0x15: // RL L
-            rl(&HL.low);
+            rl(&HL.low, &F);
             break;
         case 0x16: // RL (HL)
             t_u8 = read(HL.full); tick();
-            rl(&t_u8);
+            rl(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x17: // RL A
-            rl(&A);
+            rl(&A, &F);
             break;
         case 0x18: // RR B
-            rr(&BC.high);
+            rr(&BC.high, &F);
             break;
         case 0x19: // RR C
-            rr(&BC.low);
+            rr(&BC.low, &F);
             break;
         case 0x1A: // RR D
-            rr(&DE.high);
+            rr(&DE.high, &F);
             break;
         case 0x1B: // RR E
-            rr(&DE.low);
+            rr(&DE.low, &F);
             break;
         case 0x1C: // RR H
-            rr(&HL.high);
+            rr(&HL.high, &F);
             break;
         case 0x1D: // RR L
-            rr(&HL.low);
+            rr(&HL.low, &F);
             break;
         case 0x1E: // RR (HL)
             t_u8 = read(HL.full); tick();
-            rr(&t_u8);
+            rr(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x1F: // RR A
-            rr(&A);
+            rr(&A, &F);
             break;
         case 0x20: // SLA B
-            sla(&BC.high);
+            sla(&BC.high, &F);
             break;
         case 0x21: // SLA C
-            sla(&BC.low);
+            sla(&BC.low, &F);
             break;
         case 0x22: // SLA D
-            sla(&DE.high);
+            sla(&DE.high, &F);
             break;
         case 0x23: // SLA E
-            sla(&DE.low);
+            sla(&DE.low, &F);
             break;
         case 0x24: // SLA H
-            sla(&HL.high);
+            sla(&HL.high, &F);
             break;
         case 0x25: // SLA L
-            sla(&HL.low);
+            sla(&HL.low, &F);
             break;
         case 0x26: // SLA (HL)
             t_u8 = read(HL.full); tick();
-            sla(&t_u8);
+            sla(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x27: // SLA A
-            sla(&A);
+            sla(&A, &F);
             break;
         case 0x28: // SRA B
-            sra(&BC.high);
+            sra(&BC.high, &F);
             break;
         case 0x29: // SRA C
-            sra(&BC.low);
+            sra(&BC.low, &F);
             break;
         case 0x2A: // SRA D
-            sra(&DE.high);
+            sra(&DE.high, &F);
             break;
         case 0x2B: // SRA E
-            sra(&DE.low);
+            sra(&DE.low, &F);
             break;
         case 0x2C: // SRA H
-            sra(&HL.high);
+            sra(&HL.high, &F);
             break;
         case 0x2D: // SRA L
-            sra(&HL.low);
+            sra(&HL.low, &F);
             break;
         case 0x2E: // SRA (HL)
             t_u8 = read(HL.full); tick();
-            sra(&t_u8);
+            sra(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x2F: // SRA A
-            sra(&A);
+            sra(&A, &F);
             break;
         case 0x30: // SWAP B
-            swap(&BC.high);
+            swap(&BC.high, &F);
             break;
         case 0x31: // SWAP C
-            swap(&BC.low);
+            swap(&BC.low, &F);
             break;
         case 0x32: // SWAP D
-            swap(&DE.high);
+            swap(&DE.high, &F);
             break;
         case 0x33: // SWAP E
-            swap(&DE.low);
+            swap(&DE.low, &F);
             break;
         case 0x34: // SWAP H
-            swap(&HL.high);
+            swap(&HL.high, &F);
             break;
         case 0x35: // SWAP L
-            swap(&HL.low);
+            swap(&HL.low, &F);
             break;
         case 0x36: // SWAP (HL)
             t_u8 = read(HL.full); tick();
-            swap(&t_u8);
+            swap(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x37: // SWAP A
-            swap(&A);
+            swap(&A, &F);
             break;
         case 0x38: // SRL B
-            srl(&BC.high);
+            srl(&BC.high, &F);
             break;
         case 0x39: // SRL C
-            srl(&BC.low);
+            srl(&BC.low, &F);
             break;
         case 0x3A: // SRL D
-            srl(&DE.high);
+            srl(&DE.high, &F);
             break;
         case 0x3B: // SRL E
-            srl(&DE.low);
+            srl(&DE.low, &F);
             break;
         case 0x3C: // SRL H
-            srl(&HL.high);
+            srl(&HL.high, &F);
             break;
         case 0x3D: // SRL L
-            srl(&HL.low);
+            srl(&HL.low, &F);
             break;
         case 0x3E: // SRL (HL)
             t_u8 = read(HL.full); tick();
-            srl(&t_u8);
+            srl(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x3F: // SRL A
-            srl(&A);
+            srl(&A, &F);
             break;
         case 0x40: // BIT 0,B
-            test_bit(&BC.high, 0);
+            test_bit(&BC.high, 0, &F);
             break;
         case 0x41: // BIT 0,C
-            test_bit(&BC.low, 0);
+            test_bit(&BC.low, 0, &F);
             break;
         case 0x42: // BIT 0,D
-            test_bit(&DE.high, 0);
+            test_bit(&DE.high, 0, &F);
             break;
         case 0x43: // BIT 0,E
-            test_bit(&DE.low, 0);
+            test_bit(&DE.low, 0, &F);
             break;
         case 0x44: // BIT 0,H
-            test_bit(&HL.high, 0);
+            test_bit(&HL.high, 0, &F);
             break;
         case 0x45: // BIT 0,L
-            test_bit(&HL.low, 0);
+            test_bit(&HL.low, 0, &F);
             break;
         case 0x46: // BIT 0,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 0);
+            test_bit(&t_u8, 0, &F);
             break;
         case 0x47: // BIT 0,A
-            test_bit(&A, 0);
+            test_bit(&A, 0, &F);
             break;
         case 0x48: // BIT 1,B
-            test_bit(&BC.high, 1);
+            test_bit(&BC.high, 1, &F);
             break;
         case 0x49: // BIT 1,C
-            test_bit(&BC.low, 1);
+            test_bit(&BC.low, 1, &F);
             break;
         case 0x4A: // BIT 1,D
-            test_bit(&DE.high, 1);
+            test_bit(&DE.high, 1, &F);
             break;
         case 0x4B: // BIT 1,E
-            test_bit(&DE.low, 1);
+            test_bit(&DE.low, 1, &F);
             break;
         case 0x4C: // BIT 1,H
-            test_bit(&HL.high, 1);
+            test_bit(&HL.high, 1, &F);
             break;
         case 0x4D: // BIT 1,L
-            test_bit(&HL.low, 1);
+            test_bit(&HL.low, 1, &F);
             break;
         case 0x4E: // BIT 1,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 1);
+            test_bit(&t_u8, 1, &F);
             break;
         case 0x4F: // BIT 1,A
-            test_bit(&A, 1);
+            test_bit(&A, 1, &F);
             break;
         case 0x50: // BIT 2,B
-            test_bit(&BC.high, 2);
+            test_bit(&BC.high, 2, &F);
             break;
         case 0x51: // BIT 2,C
-            test_bit(&BC.low, 2);
+            test_bit(&BC.low, 2, &F);
             break;
         case 0x52: // BIT 2,D
-            test_bit(&DE.high, 2);
+            test_bit(&DE.high, 2, &F);
             break;
         case 0x53: // BIT 2,E
-            test_bit(&DE.low, 2);
+            test_bit(&DE.low, 2, &F);
             break;
         case 0x54: // BIT 2,H
-            test_bit(&HL.high, 2);
+            test_bit(&HL.high, 2, &F);
             break;
         case 0x55: // BIT 2,L
-            test_bit(&HL.low, 2);
+            test_bit(&HL.low, 2, &F);
             break;
         case 0x56: // BIT 2,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 2);
+            test_bit(&t_u8, 2, &F);
             break;
         case 0x57: // BIT 2,A
-            test_bit(&A, 2);
+            test_bit(&A, 2, &F);
             break;
         case 0x58: // BIT 3,B
-            test_bit(&BC.high, 3);
+            test_bit(&BC.high, 3, &F);
             break;
         case 0x59: // BIT 3,C
-            test_bit(&BC.low, 3);
+            test_bit(&BC.low, 3, &F);
             break;
         case 0x5A: // BIT 3,D
-            test_bit(&DE.high, 3);
+            test_bit(&DE.high, 3, &F);
             break;
         case 0x5B: // BIT 3,E
-            test_bit(&DE.low, 3);
+            test_bit(&DE.low, 3, &F);
             break;
         case 0x5C: // BIT 3,H
-            test_bit(&HL.high, 3);
+            test_bit(&HL.high, 3, &F);
             break;
         case 0x5D: // BIT 3,L
-            test_bit(&HL.low, 3);
+            test_bit(&HL.low, 3, &F);
             break;
         case 0x5E: // BIT 3,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 3);
+            test_bit(&t_u8, 3, &F);
             break;
         case 0x5F: // BIT 3,A
-            test_bit(&A, 3);
+            test_bit(&A, 3, &F);
             break;
         case 0x60: // BIT 4,B
-            test_bit(&BC.high, 4);
+            test_bit(&BC.high, 4, &F);
             break;
         case 0x61: // BIT 4,C
-            test_bit(&BC.low, 4);
+            test_bit(&BC.low, 4, &F);
             break;
         case 0x62: // BIT 4,D
-            test_bit(&DE.high, 4);
+            test_bit(&DE.high, 4, &F);
             break;
         case 0x63: // BIT 4,E
-            test_bit(&DE.low, 4);
+            test_bit(&DE.low, 4, &F);
             break;
         case 0x64: // BIT 4,H
-            test_bit(&HL.high, 4);
+            test_bit(&HL.high, 4, &F);
             break;
         case 0x65: // BIT 4,L
-            test_bit(&HL.low, 4);
+            test_bit(&HL.low, 4, &F);
             break;
         case 0x66: // BIT 4,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 4);
+            test_bit(&t_u8, 4, &F);
             break;
         case 0x67: // BIT 4,A
-            test_bit(&A, 4);
+            test_bit(&A, 4, &F);
             break;
         case 0x68: // BIT 5,B
-            test_bit(&BC.high, 5);
+            test_bit(&BC.high, 5, &F);
             break;
         case 0x69: // BIT 5,C
-            test_bit(&BC.low, 5);
+            test_bit(&BC.low, 5, &F);
             break;
         case 0x6A: // BIT 5,D
-            test_bit(&DE.high, 5);
+            test_bit(&DE.high, 5, &F);
             break;
         case 0x6B: // BIT 5,E
-            test_bit(&DE.low, 5);
+            test_bit(&DE.low, 5, &F);
             break;
         case 0x6C: // BIT 5,H
-            test_bit(&HL.high, 5);
+            test_bit(&HL.high, 5, &F);
             break;
         case 0x6D: // BIT 5,L
-            test_bit(&HL.low, 5);
+            test_bit(&HL.low, 5, &F);
             break;
         case 0x6E: // BIT 5,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 5);
+            test_bit(&t_u8, 5, &F);
             break;
         case 0x6F: // BIT 5,A
-            test_bit(&A, 5);
+            test_bit(&A, 5, &F);
             break;
         case 0x70: // BIT 6,B
-            test_bit(&BC.high, 6);
+            test_bit(&BC.high, 6, &F);
             break;
         case 0x71: // BIT 6,C
-            test_bit(&BC.low, 6);
+            test_bit(&BC.low, 6, &F);
             break;
         case 0x72: // BIT 6,D
-            test_bit(&DE.high, 6);
+            test_bit(&DE.high, 6, &F);
             break;
         case 0x73: // BIT 6,E
-            test_bit(&DE.low, 6);
+            test_bit(&DE.low, 6, &F);
             break;
         case 0x74: // BIT 6,H
-            test_bit(&HL.high, 6);
+            test_bit(&HL.high, 6, &F);
             break;
         case 0x75: // BIT 6,L
-            test_bit(&HL.low, 6);
+            test_bit(&HL.low, 6, &F);
             break;
         case 0x76: // BIT 6,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 6);
+            test_bit(&t_u8, 6, &F);
             break;
         case 0x77: // BIT 6,A
-            test_bit(&A, 6);
+            test_bit(&A, 6, &F);
             break;
         case 0x78: // BIT 7,B
-            test_bit(&BC.high, 7);
+            test_bit(&BC.high, 7, &F);
             break;
         case 0x79: // BIT 7,C
-            test_bit(&BC.low, 7);
+            test_bit(&BC.low, 7, &F);
             break;
         case 0x7A: // BIT 7,D
-            test_bit(&DE.high, 7);
+            test_bit(&DE.high, 7, &F);
             break;
         case 0x7B: // BIT 7,E
-            test_bit(&DE.low, 7);
+            test_bit(&DE.low, 7, &F);
             break;
         case 0x7C: // BIT 7,H
-            test_bit(&HL.high, 7);
+            test_bit(&HL.high, 7, &F);
             break;
         case 0x7D: // BIT 7,L
-            test_bit(&HL.low, 7);
+            test_bit(&HL.low, 7, &F);
             break;
         case 0x7E: // BIT 7,(HL)
             t_u8 = read(HL.full); tick();
-            test_bit(&t_u8, 7);
+            test_bit(&t_u8, 7, &F);
             break;
         case 0x7F: // BIT 7,A
-            test_bit(&A, 7);
+            test_bit(&A, 7, &F);
             break;
         case 0x80: // RES 0,B
             RESET_BIT(BC.high, 0);
@@ -1382,20 +1428,20 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x04: // INC B
-            inc_u8(&BC.high);
+            inc_u8(&BC.high, &F);
             break;
         case 0x05: // DEC B
-            dec_u8(&BC.high);
+            dec_u8(&BC.high, &F);
             break;
         case 0x06: // LD B,d8
             BC.high = read(PC++); tick();
             break;
         case 0x07: // RLCA
-            F_C = GET_BIT(A, 7);
+            F.C = GET_BIT(A, 7);
             A = ROTATE_LEFT(A, 1, 8);
-            F_Z = 0;
-            F_N = 0;
-            F_H = 0;
+            F.Z = 0;
+            F.N = 0;
+            F.H = 0;
             break;
         case 0x08: // LD (a16),SP
             t_u16.low = read(PC++); tick();
@@ -1404,7 +1450,7 @@ u8 execute_instruction(u8 op) {
             write(t_u16.full + 1, SP.high);
             break;
         case 0x09: // ADD HL,BC
-            add_u16(&HL.full, BC.full);
+            add_u16(&HL.full, BC.full, &F);
             tick();
             break;
         case 0x0A: // LD A,(BC)
@@ -1415,20 +1461,20 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x0C: // INC C
-            inc_u8(&BC.low);
+            inc_u8(&BC.low, &F);
             break;
         case 0x0D: // DEC C
-            dec_u8(&BC.low);
+            dec_u8(&BC.low, &F);
             break;
         case 0x0E: // LD C,d8
             BC.low = read(PC++); tick();
             break;
         case 0x0F: // RRCA
-            F_C = GET_BIT(A, 0);
+            F.C = GET_BIT(A, 0);
             A = ROTATE_RIGHT(A, 1, 8);
-            F_Z = 0;
-            F_N = 0;
-            F_H = 0;
+            F.Z = 0;
+            F.N = 0;
+            F.H = 0;
             break;
         case 0x10: // STOP 0
             t_u8 = 0;
@@ -1446,22 +1492,22 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x14: // INC D
-            inc_u8(&DE.high);
+            inc_u8(&DE.high, &F);
             break;
         case 0x15: // DEC D
-            dec_u8(&DE.high);
+            dec_u8(&DE.high, &F);
             break;
         case 0x16: // LD D,d8
             DE.high = read(PC++); tick();
             break;
         case 0x17: // RLA
-            t_u8 = F_C;
-            F_C = GET_BIT(A, 7);
+            t_u8 = F.C;
+            F.C = GET_BIT(A, 7);
             A <<= 1;
             if (t_u8) SET_BIT(A, 0);
-            F_Z = 0;
-            F_N = 0;
-            F_H = 0;
+            F.Z = 0;
+            F.N = 0;
+            F.H = 0;
             break;
         case 0x18: // JR r8
             t_s8 = (s8)(read(PC++)); tick();
@@ -1469,7 +1515,7 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x19: // ADD HL,DE
-            add_u16(&HL.full, DE.full);
+            add_u16(&HL.full, DE.full, &F);
             tick();
             break;
         case 0x1A: // LD A,(DE)
@@ -1480,26 +1526,26 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x1C: // INC E
-            inc_u8(&DE.low);
+            inc_u8(&DE.low, &F);
             break;
         case 0x1D: // DEC E
-            dec_u8(&DE.low);
+            dec_u8(&DE.low, &F);
             break;
         case 0x1E: // LD E,d8
             DE.low = read(PC++); tick();
             break;
         case 0x1F: // RRA
-            t_u8 = F_C;
-            F_C = GET_BIT(A, 0);
+            t_u8 = F.C;
+            F.C = GET_BIT(A, 0);
             A >>= 1;
             if (t_u8) SET_BIT(A, 7);
-            F_Z = 0;
-            F_N = 0;
-            F_H = 0;
+            F.Z = 0;
+            F.N = 0;
+            F.H = 0;
             break;
         case 0x20: // JR NZ,r8
             t_s8 = (s8)(read(PC++)); tick();
-            if (!F_Z) {
+            if (!F.Z) {
                 PC += t_s8;
                 tick();
                 cycles += 4; // additional cycles if action was taken
@@ -1517,42 +1563,43 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x24: // INC H
-            inc_u8(&HL.high);
+            inc_u8(&HL.high, &F);
             break;
         case 0x25: // DEC H
-            dec_u8(&HL.high);
+            dec_u8(&HL.high, &F);
             break;
         case 0x26: // LD H,d8
             HL.high = read(PC++); tick();
             break;
         case 0x27: // DAA
-            if (F_N == 0) {
+            if (F.N == 0) {
                 // after an addition, adjust if (half-)carry occurred or if result is out of bounds
-                if (F_C || A > 0x99) {
-                    A += 0x60; F_C = 1;
+                if (F.C || A > 0x99) {
+                    A += 0x60; 
+                    F.C = 1;
                 } // upper nibble
-                if (F_H || ((A & 0xF) > 0x9)) {
+                if (F.H || ((A & 0xF) > 0x9)) {
                     A += 0x6;
                 }  // lower nibble
             }
             else {
                 // after a subtraction, only adjust if (half-)carry occurred
-                if (F_C) A -= 0x60; // upper nibble
-                if (F_H) A -= 0x6;  // lower nibble
+                if (F.C) A -= 0x60; // upper nibble
+                if (F.H) A -= 0x6;  // lower nibble
             }
-            F_Z = (A == 0);
-            F_H = 0;
+            F.Z = (A == 0);
+            F.H = 0;
             break;
         case 0x28: // JR Z,r8
             t_s8 = (s8)(read(PC++)); tick();
-            if (F_Z) {
+            if (F.Z) {
                 PC += t_s8;
                 tick();
                 cycles += 4; // additional cycles if action was taken
             }
             break;
         case 0x29: // ADD HL,HL
-            add_u16(&HL.full, HL.full);
+            add_u16(&HL.full, HL.full, &F);
             tick();
             break;
         case 0x2A: // LD A,(HL+)
@@ -1563,22 +1610,22 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x2C: // INC L
-            inc_u8(&HL.low);
+            inc_u8(&HL.low, &F);
             break;
         case 0x2D: // DEC L
-            dec_u8(&HL.low);
+            dec_u8(&HL.low, &F);
             break;
         case 0x2E: // LD L,d8
             HL.low = read(PC++); tick();
             break;
         case 0x2F: // CPL
             A ^= 0xFF; // flip bits
-            F_N = 1;
-            F_H = 1;
+            F.N = 1;
+            F.H = 1;
             break;
         case 0x30: // JR NC,r8
             t_s8 = (s8)(read(PC++)); tick();
-            if (!F_C) {
+            if (!F.C) {
                 PC += t_s8;
                 tick();
                 cycles += 4;
@@ -1597,12 +1644,12 @@ u8 execute_instruction(u8 op) {
             break;
         case 0x34: // INC (HL)
             t_u8 = read(HL.full); tick();
-            inc_u8(&t_u8);
+            inc_u8(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x35: // DEC (HL)
             t_u8 = read(HL.full); tick();
-            dec_u8(&t_u8);
+            dec_u8(&t_u8, &F);
             write(HL.full, t_u8);
             break;
         case 0x36: // LD (HL),d8
@@ -1610,20 +1657,20 @@ u8 execute_instruction(u8 op) {
             write(HL.full, t_u8);
             break;
         case 0x37: // SCF
-            F_C = 1;
-            F_H = 0;
-            F_N = 0;
+            F.C = 1;
+            F.H = 0;
+            F.N = 0;
             break;
         case 0x38: // JR C,r8
             t_s8 = (s8)(read(PC++)); tick();
-            if (F_C) {
+            if (F.C) {
                 PC += t_s8;
                 tick();
                 cycles += 4; // additional cycles if action was taken
             }
             break;
         case 0x39: // ADD HL,SP
-            add_u16(&HL.full, SP.full);
+            add_u16(&HL.full, SP.full, &F);
             tick();
             break;
         case 0x3A: // LD A,(HL-)
@@ -1634,18 +1681,18 @@ u8 execute_instruction(u8 op) {
             tick();
             break;
         case 0x3C: // INC A
-            inc_u8(&A);
+            inc_u8(&A, &F);
             break;
         case 0x3D: // DEC A
-            dec_u8(&A);
+            dec_u8(&A, &F);
             break;
         case 0x3E: // LD A,d8
             A = read(PC++); tick();
             break;
         case 0x3F: // CCF
-            F_C ^= 1;
-            F_H = 0;
-            F_N = 0;
+            F.C ^= 1;
+            F.H = 0;
+            F.N = 0;
             break;
         case 0x40: // LD B,B
             // BC.high = BC.high;
@@ -1841,209 +1888,209 @@ u8 execute_instruction(u8 op) {
             //A = A;
             break;
         case 0x80: // ADD A,B
-            add_u8(&A, BC.high);
+            add_u8(&A, BC.high, &F);
             break;
         case 0x81: // ADD A,C
-            add_u8(&A, BC.low);
+            add_u8(&A, BC.low, &F);
             break;
         case 0x82: // ADD A,D
-            add_u8(&A, DE.high);
+            add_u8(&A, DE.high, &F);
             break;
         case 0x83: // ADD A,E
-            add_u8(&A, DE.low);
+            add_u8(&A, DE.low, &F);
             break;
         case 0x84: // ADD A,H
-            add_u8(&A, HL.high);
+            add_u8(&A, HL.high, &F);
             break;
         case 0x85: // ADD A,L
-            add_u8(&A, HL.low);
+            add_u8(&A, HL.low, &F);
             break;
         case 0x86: // ADD A,(HL)
             t_u8 = read(HL.full); tick();
-            add_u8(&A, t_u8);
+            add_u8(&A, t_u8, &F);
             break;
         case 0x87: // ADD A,A
-            add_u8(&A, A);
+            add_u8(&A, A, &F);
             break;
         case 0x88: // ADC A,B
-            adc_u8(&A, BC.high);
+            adc_u8(&A, BC.high, &F);
             break;
         case 0x89: // ADC A,C
-            adc_u8(&A, BC.low);
+            adc_u8(&A, BC.low, &F);
             break;
         case 0x8A: // ADC A,D
-            adc_u8(&A, DE.high);
+            adc_u8(&A, DE.high, &F);
             break;
         case 0x8B: // ADC A,E
-            adc_u8(&A, DE.low);
+            adc_u8(&A, DE.low, &F);
             break;
         case 0x8C: // ADC A,H
-            adc_u8(&A, HL.high);
+            adc_u8(&A, HL.high, &F);
             break;
         case 0x8D: // ADC A,L
-            adc_u8(&A, HL.low);
+            adc_u8(&A, HL.low, &F);
             break;
         case 0x8E: // ADC A,(HL)
             t_u8 = read(HL.full); tick();
-            adc_u8(&A, t_u8);
+            adc_u8(&A, t_u8, &F);
             break;
         case 0x8F: // ADC A,A
-            adc_u8(&A, A);
+            adc_u8(&A, A, &F);
             break;
         case 0x90: // SUB B
-            sub_u8(BC.high);
+            sub_u8(&A, BC.high, &F);
             break;
         case 0x91: // SUB C
-            sub_u8(BC.low);
+            sub_u8(&A, BC.low, &F);
             break;
         case 0x92: // SUB D
-            sub_u8(DE.high);
+            sub_u8(&A, DE.high, &F);
             break;
         case 0x93: // SUB E
-            sub_u8(DE.low);
+            sub_u8(&A, DE.low, &F);
             break;
         case 0x94: // SUB H
-            sub_u8(HL.high);
+            sub_u8(&A, HL.high, &F);
             break;
         case 0x95: // SUB L
-            sub_u8(HL.low);
+            sub_u8(&A, HL.low, &F);
             break;
         case 0x96: // SUB (HL)
             t_u8 = read(HL.full); tick();
-            sub_u8(t_u8);
+            sub_u8(&A, t_u8, &F);
             break;
         case 0x97: // SUB A
-            sub_u8(A);
+            sub_u8(&A, A, &F);
             break;
         case 0x98: // SBC B
-            sbc_u8(BC.high);
+            sbc_u8(&A, BC.high, &F);
             break;
         case 0x99: // SBC C
-            sbc_u8(BC.low);
+            sbc_u8(&A, BC.low, &F);
             break;
         case 0x9A: // SBC D
-            sbc_u8(DE.high);
+            sbc_u8(&A, DE.high, &F);
             break;
         case 0x9B: // SBC E
-            sbc_u8(DE.low);
+            sbc_u8(&A, DE.low, &F);
             break;
         case 0x9C: // SBC H
-            sbc_u8(HL.high);
+            sbc_u8(&A, HL.high, &F);
             break;
         case 0x9D: // SBC L
-            sbc_u8(HL.low);
+            sbc_u8(&A, HL.low, &F);
             break;
         case 0x9E: // SBC (HL)
             t_u8 = read(HL.full); tick();
-            sbc_u8(t_u8);
+            sbc_u8(&A, t_u8, &F);
             break;
         case 0x9F: // SBC A
-            sbc_u8(A);
+            sbc_u8(&A, A, &F);
             break;
         case 0xA0: // AND B
-            and_u8(BC.high);
+            and_u8(&A, BC.high, &F);
             break;
         case 0xA1: // AND C
-            and_u8(BC.low);
+            and_u8(&A, BC.low, &F);
             break;
         case 0xA2: // AND D
-            and_u8(DE.high);
+            and_u8(&A, DE.high, &F);
             break;
         case 0xA3: // AND E
-            and_u8(DE.low);
+            and_u8(&A, DE.low, &F);
             break;
         case 0xA4: // AND H
-            and_u8(HL.high);
+            and_u8(&A, HL.high, &F);
             break;
         case 0xA5: // AND L
-            and_u8(HL.low);
+            and_u8(&A, HL.low, &F);
             break;
         case 0xA6: // AND (HL)
             t_u8 = read(HL.full); tick();
-            and_u8(t_u8);
+            and_u8(&A, t_u8, &F);
             break;
         case 0xA7: // AND A
-            and_u8(A);
+            and_u8(&A, A, &F);
             break;
         case 0xA8: // XOR B
-            xor_u8(BC.high);
+            xor_u8(&A, BC.high, &F);
             break;
         case 0xA9: // XOR C
-            xor_u8(BC.low);
+            xor_u8(&A, BC.low, &F);
             break;
         case 0xAA: // XOR D
-            xor_u8(DE.high);
+            xor_u8(&A, DE.high, &F);
             break;
         case 0xAB: // XOR E
-            xor_u8(DE.low);
+            xor_u8(&A, DE.low, &F);
             break;
         case 0xAC: // XOR H
-            xor_u8(HL.high);
+            xor_u8(&A, HL.high, &F);
             break;
         case 0xAD: // XOR L
-            xor_u8(HL.low);
+            xor_u8(&A, HL.low, &F);
             break;
         case 0xAE: // XOR (HL)
             t_u8 = read(HL.full); tick();
-            xor_u8(t_u8);
+            xor_u8(&A, t_u8, &F);
             break;
         case 0xAF: // XOR A
-            xor_u8(A);
+            xor_u8(&A, A, &F);
             break;
         case 0xB0: // OR B
-            or_u8(BC.high);
+            or_u8(&A, BC.high, &F);
             break;
         case 0xB1: // OR C
-            or_u8(BC.low);
+            or_u8(&A, BC.low, &F);
             break;
         case 0xB2: // OR D
-            or_u8(DE.high);
+            or_u8(&A, DE.high, &F);
             break;
         case 0xB3: // OR E
-            or_u8(DE.low);
+            or_u8(&A, DE.low, &F);
             break;
         case 0xB4: // OR H
-            or_u8(HL.high);
+            or_u8(&A, HL.high, &F);
             break;
         case 0xB5: // OR L
-            or_u8(HL.low);
+            or_u8(&A, HL.low, &F);
             break;
         case 0xB6: // OR (HL)
             t_u8 = read(HL.full); tick();
-            or_u8(t_u8);
+            or_u8(&A, t_u8, &F);
             break;
         case 0xB7: // OR A
-            or_u8(A);
+            or_u8(&A, A, &F);
             break;
         case 0xB8: // CP B
-            cp_u8(BC.high);
+            cp_u8(&A, BC.high, &F);
             break;
         case 0xB9: // CP C
-            cp_u8(BC.low);
+            cp_u8(&A, BC.low, &F);
             break;
         case 0xBA: // CP D
-            cp_u8(DE.high);
+            cp_u8(&A, DE.high, &F);
             break;
         case 0xBB: // CP E
-            cp_u8(DE.low);
+            cp_u8(&A, DE.low, &F);
             break;
         case 0xBC: // CP H
-            cp_u8(HL.high);
+            cp_u8(&A, HL.high, &F);
             break;
         case 0xBD: // CP L
-            cp_u8(HL.low);
+            cp_u8(&A, HL.low, &F);
             break;
         case 0xBE: // CP (HL)
             t_u8 = read(HL.full); tick();
-            cp_u8(t_u8);
+            cp_u8(&A, t_u8, &F);
             break;
         case 0xBF: // CP A
-            cp_u8(A);
+            cp_u8(&A, A, &F);
             break;
         case 0xC0: // RET NZ
             tick();
             // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-            if (!F_Z) {
+            if (!F.Z) {
                 t_u16.low = read(SP.full++); tick();
                 t_u16.high = read(SP.full++); tick();
                 PC = t_u16.full;
@@ -2058,7 +2105,7 @@ u8 execute_instruction(u8 op) {
         case 0xC2: // JP NZ,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (!F_Z) {
+            if (!F.Z) {
                 PC = t_u16.full;
                 tick();
                 cycles += 4;
@@ -2073,7 +2120,7 @@ u8 execute_instruction(u8 op) {
         case 0xC4: // CALL NZ,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (!F_Z) {
+            if (!F.Z) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
@@ -2090,7 +2137,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xC6: // ADD A,d8
             t_u8 = read(PC++); tick();
-            add_u8(&A, t_u8);
+            add_u8(&A, t_u8, &F);
             break;
         case 0xC7: // RST 00H
             tick();
@@ -2102,7 +2149,7 @@ u8 execute_instruction(u8 op) {
         case 0xC8: // RET Z
             tick();
             // Pop 2 bytes from the stack and increase SP (stack grows downwards)
-            if (F_Z) {
+            if (F.Z) {
                 t_u16.low = read(SP.full++); tick();
                 t_u16.high = read(SP.full++); tick();
                 PC = t_u16.full;
@@ -2119,7 +2166,7 @@ u8 execute_instruction(u8 op) {
         case 0xCA: // JP Z,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (F_Z) {
+            if (F.Z) {
                 PC = t_u16.full;
                 tick();
                 cycles += 4;
@@ -2132,7 +2179,7 @@ u8 execute_instruction(u8 op) {
         case 0xCC: // CALL Z,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (F_Z) {
+            if (F.Z) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
@@ -2152,7 +2199,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xCE: // ADC A,d8
             t_u8 = read(PC++); tick();
-            adc_u8(&A, t_u8);
+            adc_u8(&A, t_u8, &F);
             break;
         case 0xCF: // RST 08H
             tick();
@@ -2164,7 +2211,7 @@ u8 execute_instruction(u8 op) {
 
         case 0xD0: // RET NC
             tick();
-            if (!F_C) {
+            if (!F.C) {
                 // Pop 2 bytes from the stack and increase SP (stack grows downwards)
                 t_u16.low = read(SP.full++); tick();
                 t_u16.high = read(SP.full++); tick();
@@ -2180,7 +2227,7 @@ u8 execute_instruction(u8 op) {
         case 0xD2: // JP NC,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (!F_C) {
+            if (!F.C) {
                 PC = t_u16.full;
                 tick();
                 cycles += 4;
@@ -2192,7 +2239,7 @@ u8 execute_instruction(u8 op) {
         case 0xD4: // CALL NC,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (!F_C) {
+            if (!F.C) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
@@ -2208,7 +2255,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xD6: // SUB d8
             t_u8 = read(PC++); tick();
-            sub_u8(t_u8);
+            sub_u8(&A, t_u8, &F);
             break;
         case 0xD7: // RST 10H
             tick();
@@ -2219,7 +2266,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xD8: // RET C
             tick();
-            if (F_C) {
+            if (F.C) {
                 // Pop 2 bytes from the stack and increase SP (stack grows downwards)
                 t_u16.low = read(SP.full++); tick();
                 t_u16.high = read(SP.full++); tick();
@@ -2238,7 +2285,7 @@ u8 execute_instruction(u8 op) {
         case 0xDA: // JP C,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (F_C) {
+            if (F.C) {
                 PC = t_u16.full;
                 tick();
                 cycles += 4;
@@ -2250,7 +2297,7 @@ u8 execute_instruction(u8 op) {
         case 0xDC: // CALL C,a16
             t_u16.low = read(PC++); tick();
             t_u16.high = read(PC++); tick();
-            if (F_C) {
+            if (F.C) {
                 // push PC onto stack, then jump to address
                 write(--SP.full, (PC >> 8) & 0xFF);
                 write(--SP.full, (PC & 0xFF));
@@ -2264,7 +2311,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xDE: // SBC A,d8
             t_u8 = read(PC++); tick();
-            sbc_u8(t_u8);
+            sbc_u8(&A, t_u8, &F);
             break;
         case 0xDF: // RST 18H
             tick();
@@ -2301,7 +2348,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xE6: // AND d8
             t_u8 = read(PC++); tick();
-            and_u8(t_u8);
+            and_u8(&A, t_u8, &F);
             break;
         case 0xE7: // RST 20H
             tick();
@@ -2314,12 +2361,12 @@ u8 execute_instruction(u8 op) {
             t_s8 = (s8)read(PC++); tick();
             t_int = SP.full + t_s8;
             
-            F_N = 0;
-            F_Z = 0;
+            F.N = 0;
+            F.Z = 0;
             // Set Half-Carry flag if bit 4 changed due to addition
-            F_H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
+            F.H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
             // Set Carry flag if bit 8 changed due to addition
-            F_C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
+            F.C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
 
             //SP.full += t_s8;
             SP.low = (t_int & 0xFFFF) & 0xFF;
@@ -2346,7 +2393,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xEE: // XOR d8
             t_u8 = read(PC++); tick();
-            xor_u8(t_u8);
+            xor_u8(&A, t_u8, &F);
             break;
         case 0xEF: // RST 28H
             tick();
@@ -2365,10 +2412,10 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xF1: // POP AF
             t_u8 = read(SP.full++); tick();
-            F_C = GET_BIT(t_u8, 4);
-            F_H = GET_BIT(t_u8, 5);
-            F_N = GET_BIT(t_u8, 6);
-            F_Z = GET_BIT(t_u8, 7);
+            F.C = GET_BIT(t_u8, 4);
+            F.H = GET_BIT(t_u8, 5);
+            F.N = GET_BIT(t_u8, 6);
+            F.Z = GET_BIT(t_u8, 7);
             A = read(SP.full++); tick();
             break;
         case 0xF2: // LD A,(C)
@@ -2388,12 +2435,12 @@ u8 execute_instruction(u8 op) {
             write(--SP.full, A);
             // reconstruct the F register
             t_u8 = 0;
-            t_u8 |= ((F_Z << 7) | (F_N << 6) | (F_H << 5) | (F_C << 4));
+            t_u8 |= ((F.Z << 7) | (F.N << 6) | (F.H << 5) | (F.C << 4));
             write(--SP.full, t_u8);
             break;
         case 0xF6: // OR d8
             t_u8 = read(PC++); tick();
-            or_u8(t_u8);
+            or_u8(&A, t_u8, &F);
             break;
         case 0xF7: // RST 30H
             tick();
@@ -2406,12 +2453,12 @@ u8 execute_instruction(u8 op) {
             t_s8 = (s8)read(PC++); tick();
             t_int = SP.full + t_s8;
 
-            F_N = 0;
-            F_Z = 0;
+            F.N = 0;
+            F.Z = 0;
             // Set Half-Carry flag if bit 4 changed due to addition
-            F_H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
+            F.H = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x10) == 0x10);
             // Set Carry flag if bit 8 changed due to addition
-            F_C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
+            F.C = (((SP.full ^ t_s8 ^ (t_int & 0xFFFF)) & 0x100) == 0x100);
 
             HL.full = (SP.full + t_s8);
             tick();
@@ -2436,7 +2483,7 @@ u8 execute_instruction(u8 op) {
             break;
         case 0xFE: // CP d8
             t_u8 = read(PC++); tick();
-            cp_u8(t_u8);
+            cp_u8(&A, t_u8, &F);
             break;
         case 0xFF: // RST 38H
             tick();

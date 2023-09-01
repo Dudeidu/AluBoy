@@ -10,6 +10,7 @@
 #include "gb.h"
 #include "mmu.h"
 #include "input.h"
+#include "timer.h"
 
 
 #define PIXELS_PER_BYTE 1
@@ -23,6 +24,8 @@ typedef struct {
 u8* lcd_buffer  = NULL;
 
 u8 redraw_flag;
+
+u8  vram_accessible;  // whether the VRAM is accessible for reading (PPU only)
 
 u16 scanline_counter; // every >SCANLINE_DOTS, update LY
 u8  window_counter;
@@ -51,6 +54,7 @@ void check_lyc();
 void check_stat_irq(u8 stat_int_source);
 void update_palette(u8 reg, u8 value);
 void disable_lcd();
+void enable_lcd();
 
 // PUBLIC --------------------------------------------------
 
@@ -75,6 +79,7 @@ void ppu_powerup()
     lcd_mode = LCD_MODE_VBLANK;
     lcd_enabled      = 1;
     lcd_mode_next = SCANLINE_DOTS;
+    vram_accessible = 1;
 
     stat_irq_flag = 0;
     stat_bug = 0;
@@ -141,13 +146,10 @@ void ppu_write_register(u8 reg_id, u8 value) {
             if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
             {
                 disable_lcd();
-                lcd_enabled = 0;
             }
             else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
                 //printf("lcd enabled\n");
-                lcd_enabled = 1;
-                check_lyc();
-                check_stat_irq(0);
+                enable_lcd();
             }
             reg[REG_LCDC] = value;
             break;
@@ -160,8 +162,11 @@ void ppu_write_register(u8 reg_id, u8 value) {
             // so it does not block if Mode 0 is enabled as well.
             reg[REG_STAT] = value ;
             if (lcd_enabled) {
-                if (!cgb_mode) stat_bug = 1;
-                check_stat_irq(0);
+                if (!cgb_mode) {
+                    stat_bug = 1;
+                    check_stat_irq(0);
+                    stat_bug = 0;
+                }
             }
             break;
         case REG_SCX:
@@ -221,11 +226,20 @@ void oam_dma_transfer_tick() {
     }
 }
 
+u8 ct = 0;
 void ppu_tick()
 {
     u8 clock = M_CYCLE;
 
     if (!lcd_enabled) return;
+
+    /*
+    ct++;
+    if (ct % 10 == 0)
+        printf("%d,", stat_irq_flag);
+        */
+    //check_stat_irq(0);
+
 
     scanline_counter += clock;
     if (scanline_counter < lcd_mode_next) return;
@@ -235,14 +249,20 @@ void ppu_tick()
             reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VRAM;
             lcd_mode = LCD_MODE_VRAM;
             lcd_mode_next += 172;
+
+            // TODO figure out stat irq blocking
+            // This line fixes donkey kong for some reason
+            stat_irq_flag = 0;
+
+            vram_accessible = 1;
             break;
 
         case LCD_MODE_VRAM: // Reading OAM and VRAM to generate the picture
-            // request hblank interrupt if enabled
-
             reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
             lcd_mode = LCD_MODE_HBLANK;
             lcd_mode_next = SCANLINE_DOTS;
+
+            vram_accessible = 0;
 
             // request stat interrupt if enabled
             check_stat_irq(0);
@@ -305,6 +325,14 @@ void ppu_tick()
                 reg[REG_LY] = 0;
                 window_counter = 0;
 
+                // obscure behavior
+                if (cgb_mode && !double_speed) {
+                    vram_accessible = 0;
+                }
+                if (double_speed) {
+                    vram_accessible = 1;
+                }
+
                 // reset input fetching
                 input_updated = 0;
 
@@ -332,6 +360,8 @@ void ppu_cleanup()
     }
 }
 
+
+
 // PRIVATE --------------------------------------------------
 
 // assigns gray shades to the color indexes
@@ -358,6 +388,8 @@ void disable_lcd() {
     set LY to 0.
     */
 
+    lcd_enabled = 0;
+
     RESET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE);
     RESET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE);
     reg[REG_LY] = 0;
@@ -365,7 +397,6 @@ void disable_lcd() {
     scanline_counter = 0;
     window_counter = 0;
 
-    
     // request hblank interrupt if enabled
     check_stat_irq(STAT_INT_HBLANK);
     
@@ -373,8 +404,16 @@ void disable_lcd() {
     
     lcd_mode = LCD_MODE_HBLANK;
     lcd_mode_next = SCANLINE_DOTS;
+    
+    vram_accessible = 0;
 
     memset(lcd_buffer, MEM_ROM_0, buffer_size);
+}
+void enable_lcd() {
+    lcd_enabled = 1;
+    vram_accessible = 1;
+    check_lyc();
+    check_stat_irq(0);
 }
 
 // Custom comparison function for sorting objects
@@ -478,10 +517,6 @@ void draw_tiles(u8 y) {
     u8  td_area_flag    = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
     u16 vram_offset     = MEM_VRAM;
 
-    // Drawing optimization
-   // int tile_index_prev = -1;
-   // u8  row_prev = 0;
-
     u8  window_in_line  = 0;
     u8  bg_in_line = 1;
 
@@ -499,15 +534,10 @@ void draw_tiles(u8 y) {
     u8  color_index;
     u16 td_addr, pixel_offset;
 
-    /*
-    u16 tile_index_changes = 0;
-    u16 tm_addr_changes = 0;
-    u16 bg_pixels = 0;
-    u16 win_pixels = 0;
-    u16 pixels_updates = 0;
-    */
+    // debug
+    u8 bg_pixels = 0;
+    u8 win_pixels = 0;
 
-    //printf("%d,", wy);
     // check if window is enabled and visible at this scanline
     if (GET_BIT(reg[REG_LCDC], LCDC_W_ENABLE) && wy <= y && wx < SCREEN_WIDTH + 7) {
         window_in_line = 1;
@@ -546,7 +576,7 @@ void draw_tiles(u8 y) {
 
             tm_addr = win_tm_area + ypos + xpos;
 
-            //win_pixels++;
+            win_pixels++;
         }
         else {
             ypos = bg_y;
@@ -557,7 +587,7 @@ void draw_tiles(u8 y) {
 
             tm_addr = bg_tm_area + ypos + xpos;
 
-            //bg_pixels++;
+            bg_pixels++;
         }
 
         // Only fetch new bytes when the tilemap address has changed
@@ -597,7 +627,7 @@ void draw_tiles(u8 y) {
             
     }
 
-    if (debug_show_line_data) printf("sx:%03d sy:%03d wx:%03d wy:%03d w_inline:%d bg_inline:%d ", sx, sy, wx, wy, window_in_line, bg_in_line);
+    if (debug_show_line_data) printf("sx:%03d sy:%03d wx:%03d wy:%03d w_inline:%d bg_inline:%d winp:%d bgp:%d ", sx, sy, wx, wy, window_in_line, bg_in_line, win_pixels, bg_pixels);
 }
 
 void draw_objects(u8 y) {

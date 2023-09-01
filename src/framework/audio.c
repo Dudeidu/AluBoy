@@ -14,6 +14,7 @@ int sample_counter = 0;
 unsigned short samples_gathered = 0;  // when we collect enough samples we output them to the audio device.
 u8* sample_buffer = NULL;
 
+u8 audio_enabled;
 
 int audio_init() {
  
@@ -45,13 +46,24 @@ int audio_init() {
 
     sample_buffer = (u8*)malloc(sizeof(u8) * have.samples);
 
-    SDL_PauseAudioDevice(dev, 0); // start playing sound
+    audio_enabled = 0;
+
+    SDL_PauseAudioDevice(dev, !audio_enabled); // start/stop playing sound
 
     return 1;
 }
 
+void audio_toggle() {
+    audio_enabled = !audio_enabled;
+    SDL_PauseAudioDevice(dev, !audio_enabled); // start/stop playing sound
+    if (!audio_enabled)
+        SDL_ClearQueuedAudio(dev);
+}
+
 void audio_add_sample(u8 sample) {
     u8 sound_mode = 1;
+    if (!audio_enabled) return;
+
     sample_buffer[samples_gathered++] = sample + have.silence;
 
     if (samples_gathered >= have.samples) {

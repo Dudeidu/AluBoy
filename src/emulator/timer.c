@@ -26,8 +26,8 @@ void timer_powerup()
     reg[REG_TIMA]   = 0x00;
     reg[REG_TMA]    = 0x00;
     reg[REG_TAC]    = 0xF8;
-    timer_speed     = 256;
-    timer_clock_bit = 7;
+    timer_speed     = 1024;
+    timer_clock_bit = 9;
     timer_enabled   = 0;
 }
 

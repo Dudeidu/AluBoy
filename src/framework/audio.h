@@ -13,4 +13,6 @@ void audio_cleanup();
 
 void audio_add_sample(u8 sample);
 
+void audio_toggle();
+
 #endif GRAPHICS_H

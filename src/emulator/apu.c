@@ -8,7 +8,7 @@
 #include "gb.h"
 
 
-u16 sample_frequency = 95;  // how often to gather samples 4194304 Hz / 44100 / Hz / 4 t-cycles
+u16 sample_frequency = 95;  // how often to gather samples 4194304 Hz / 44100 Hz / 4 t-cycles
 u16 sample_timer = 0;       // counts up to sample_frequency
 int apu_counter = 0;
 
@@ -546,6 +546,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             else if (!GET_BIT(reg[REG_NR52], 7) && GET_BIT(value, 7)) {
                 SET_BIT(reg[REG_NR52], 7);
                 apu_enabled = 1;
+                //apu_powerup();
             }
             break;
 
@@ -932,7 +933,7 @@ void turn_off() {
     reg[REG_NR44] = 0;
     reg[REG_NR50] = 0;
     reg[REG_NR51] = 0;
-    reg[REG_NR52] = 0x80; // except high bit
+    reg[REG_NR52] = 0;
 
     for (int i = 0; i < 16; i++) {
         reg[REG_WAVERAM + i] = 0;
@@ -982,5 +983,4 @@ void turn_off() {
     ch4_env_vol = 0;
     ch4_env_sweep_counter = 0;
     ch4_env_enabled = 0;
-
 }

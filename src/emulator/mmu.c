@@ -257,15 +257,15 @@ u8 read(u16 addr)
             if (addr >= MEM_IO && addr < MEM_HRAM) {
                 u8 reg_id = addr & 0xFF;
 
+                // Timer registers
+                if (reg_id >= REG_DIV && reg_id <= REG_TAC)
+                    return timer_read_register(reg_id);
                 // APU registers
-                if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
+                else if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
                     return apu_read_register(reg_id);
                 // PPU registers
                 else if ((reg_id >= REG_LCDC && reg_id <= REG_WX) || (reg_id >= REG_BGPI && reg_id <= REG_OPRI))
                     return ppu_read_register(reg_id);
-                // Timer registers
-                else if (reg_id >= REG_DIV && reg_id <= REG_TAC)
-                    return timer_read_register(reg_id);
                 // CPU registers
                 else
                     return cpu_read_register(reg_id);
@@ -487,12 +487,12 @@ void write(u16 addr, u8 value)
                 if (addr >= MEM_IO && addr < MEM_HRAM) {
                     u8 reg_id = addr & 0xFF;
 
-                    // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
-                    if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
-                        apu_write_register(reg_id, value);
                     // Timer registers
-                    else if (reg_id >= REG_DIV && reg_id <= REG_TAC)
+                    if (reg_id >= REG_DIV && reg_id <= REG_TAC)
                         timer_write_register(reg_id, value);
+                    // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
+                    else if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
+                        apu_write_register(reg_id, value);
                     // PPU registers
                     else if ((reg_id >= REG_LCDC && reg_id <= REG_WX) || (reg_id >= REG_BGPI && reg_id <= REG_OPRI))
                         ppu_write_register(reg_id, value);
