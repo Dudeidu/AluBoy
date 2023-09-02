@@ -8,6 +8,53 @@
 #include "gb.h"
 
 
+typedef struct Channel {
+    u8  enabled;        // whether a sound channel is enabled or not
+    u8  dac_enabled;    // whether a sound channel's DAC is enabled or not
+    u8  pan_left;       // sound panning   0/1 flag
+    u8  pan_right;
+    u8  output;         
+
+    u8  len_enabled;    // 1=Stop output when length in NRX1 expires
+    u16 len_timer;      // the higher this value is, the shorter the time before the channel is cut (it counts up to 64 / 255 on wave)
+    u16 frequency;      // combination of NRX3 + NRX4(0-2)  
+    int timer;          // the timer resets to ((2048 - frequency) * 4) when it reaches 0
+} SoundChannel;
+
+typedef struct Envelope {
+    u8  enabled;         
+    u8  sweep_pace;     // how quickly the volume of the sound changes over time (0=no Sweep)
+    u8  sweep_counter;  // internal timer
+    u8  positive_flag;  // envelope direction (0=decrease, 1=increase)
+    u8  volume;         // initial volume of envelope (0-F) (0=no Sound)
+} Envelope;
+
+typedef struct Noise {
+    u16 lfsr;
+    u8  clock_div;
+    u8  lfsr_width_mode;
+    u8  clock_shift;
+} Noise;
+
+typedef struct FrequencySweep {
+    u8  enabled;        // internal flag
+    u8  counter;        // internal timer
+    u8  pace;           // how quickly the sweep period gets changed over time 0-7 range
+    u8  negative_flag;  // sweep increase/decrease 0/1 flag
+    u8  shift;          // how big the sweep period change is each iteration
+    u16 freq_shadow;    // frequency shadow register
+} FrequencySweep;
+
+typedef struct SquareWave {
+    u8 duty_cycle;      // defines which waveform is used. the ratio of the time spent low vs. high
+    u8 sequence;        // the bit index in the current waveform
+} SquareWave;
+
+typedef struct Wave {
+    u8 volume;
+    u8 position;
+} Wave;
+
 u16 sample_frequency = 95;  // how often to gather samples 4194304 Hz / 44100 Hz / 4 t-cycles
 u16 sample_timer = 0;       // counts up to sample_frequency
 int apu_counter = 0;
@@ -19,42 +66,6 @@ u8 apu_clock_bit;           // Picks a bit from the internal clock and uses it t
 u8 vol_l, vol_r;            // master volume   0-7 range
 u8 vin_pan_l, vin_pan_r;    // VIN panning     0/1 flag
 
-u8 ch1_sweep_pace;          // how quickly the sweep period gets changed over time 0-7 range
-u8 ch1_sweep_negative;      // sweep increase/decrease 0/1 flag
-u8 ch1_sweep_shift;         // how big the sweep period change is each iteration
-u8 ch1_sweep_counter;
-u8 ch1_sweep_enabled;       // internal flag
-u16 ch1_freq_shadow;        // frequency shadow register
-
-u8 ch1_duty_cycle;          // defines which waveform is used. the ratio of the time spent low vs. high
-u8 ch1_sequence;            // the bit index in the current waveform
-u8 ch1_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
-u8 ch1_env_positive;        // envelope direction (0=decrease, 1=increase)
-u8 ch1_env_vol;             // initial volume of envelope (0-F) (0=no Sound)
-s8 ch1_env_sweep_counter;
-u8 ch1_env_enabled;
-
-u8 ch2_duty_cycle;          // defines which waveform is used. the ratio of the time spent low vs. high
-u8 ch2_sequence;            // the bit index in the current waveform
-u8 ch2_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
-u8 ch2_env_positive;        // envelope direction (0=decrease, 1=increase)
-u8 ch2_env_vol;       // initial volume of envelope (0-F) (0=no Sound)
-u8 ch2_env_sweep_counter;
-u8 ch2_env_enabled;
-
-u8 ch3_vol;
-u8 ch3_wave_position;
-
-u16 lfsr;
-u8 ch4_clock_div;
-u8 ch4_lfsr_width_mode;
-u8 ch4_clock_shift;
-
-u8 ch4_env_sweep_pace;      // how quickly the volume of the sound changes over time (0=no Sweep)
-u8 ch4_env_positive;        // envelope direction (0=decrease, 1=increase)
-u8 ch4_env_vol;       // initial volume of envelope (0-F) (0=no Sound)
-u8 ch4_env_sweep_counter;
-u8 ch4_env_enabled;
 
 const u8 sw_duty_cycle[4] = {   // square channel duty cycle waveforms
     0x1,    // 12.5%    00000001
@@ -67,23 +78,22 @@ const u8 nw_divisors[8] = { // noise channel clock divider's divisor
     8, 16, 32, 48, 64, 80, 96, 112
 };
 
-typedef struct Channel {
-    u8  enabled;        // whether a sound channel is enabled or not
-    u8  dac_enabled;    // whether a sound channel's DAC is enabled or not
-    u8  pan_left;       // sound panning   0/1 flag
-    u8  pan_right;
-    u8  output;         
 
-    u8  len_enabled;    // 1=Stop output when length in NRX1 expires
-    u16 len_timer;      // the higher this value is, the shorter the time before the channel is cut (it counts up to 64 / 255 on wave)
-    u16 frequency;      // combination of NRX3 + NRX4(0-2)  
-    int timer;          // the timer resets to ((2048 - frequency) * 4) when it reaches 0
-} Channel;
+SoundChannel    ch1;
+Envelope        ch1_env;
+FrequencySweep  ch1_sweep;
+SquareWave      ch1_sqw;
 
-Channel ch1;
-Channel ch2;
-Channel ch3;
-Channel ch4;
+SoundChannel    ch2;
+Envelope        ch2_env;
+SquareWave      ch2_sqw;
+
+SoundChannel    ch3;
+Wave            ch3_wave;
+
+SoundChannel    ch4;
+Envelope        ch4_env;
+Noise           ch4_noise;
 
 
 // Forward declaration
@@ -138,8 +148,8 @@ void apu_powerup()
 
     ch1.dac_enabled = 1;
     ch1.enabled     = 1;
-    ch1_env_sweep_counter = 0;
-    ch1_env_enabled  = 1;
+    ch1_env.sweep_counter = 0;
+    ch1_env.enabled  = 1;
     apu_write_register(REG_NR10, reg[REG_NR10]);
     apu_write_register(REG_NR11, reg[REG_NR11]);
     apu_write_register(REG_NR12, reg[REG_NR12]);
@@ -148,16 +158,16 @@ void apu_powerup()
 
     ch2.dac_enabled = 1;
     ch2.enabled     = 1;
-    ch2_env_sweep_counter = 0;
-    ch2_env_enabled  = 1;
+    ch2_env.sweep_counter = 0;
+    ch2_env.enabled  = 1;
     apu_write_register(REG_NR21, reg[REG_NR21]);
     apu_write_register(REG_NR22, reg[REG_NR22]);
     apu_write_register(REG_NR23, reg[REG_NR23]);
     apu_write_register(REG_NR24, reg[REG_NR24]);
-
+    
     ch3.dac_enabled = 1;
     ch3.enabled     = 1;
-    ch3_wave_position = 1;
+    ch3_wave.position = 1;
     apu_write_register(REG_NR30, reg[REG_NR30]);
     apu_write_register(REG_NR31, reg[REG_NR31]);
     apu_write_register(REG_NR32, reg[REG_NR32]);
@@ -166,8 +176,8 @@ void apu_powerup()
 
     ch4.dac_enabled = 1;
     ch4.enabled     = 1;
-    ch4_env_sweep_counter = 0;
-    ch4_env_enabled  = 1;
+    ch4_env.sweep_counter = 0;
+    ch4_env.enabled  = 1;
     apu_write_register(REG_NR41, reg[REG_NR41]);
     apu_write_register(REG_NR42, reg[REG_NR42]);
     apu_write_register(REG_NR43, reg[REG_NR43]);
@@ -206,7 +216,6 @@ u8 apu_read_register(u8 reg_id) {
             return reg[reg_id];
     }
 }
-
 int apu_write_register(u8 reg_id, u8 value) {
     // Turning the APU off makes its registers read-only until turned back on, except NR52 and Wave RAM
     if (!apu_enabled && reg_id != REG_NR52 && reg_id < REG_WAVERAM) return -1;
@@ -223,12 +232,12 @@ int apu_write_register(u8 reg_id, u8 value) {
             // However, if bits 4–6 are all set to 0, then iterations are instantly disabled, 
             // and the pace will be reloaded immediately if it’s set to something else.
 
-            if (ch1_sweep_pace == 0) {
-                ch1_sweep_enabled = 0;
-                ch1_sweep_pace  = (value >> 4) & 0x7;
+            if (ch1_sweep.pace == 0) {
+                ch1_sweep.enabled   = 0;
+                ch1_sweep.pace      = (value >> 4) & 0x7;
             }
-            ch1_sweep_negative  = GET_BIT(value, 3);
-            ch1_sweep_shift     = value & 0x7;
+            ch1_sweep.negative_flag = GET_BIT(value, 3);
+            ch1_sweep.shift         = value & 0x7;
 
             reg[reg_id] = value;
 
@@ -238,7 +247,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             Bit 7-6 - Wave duty            (Read/Write)
             Bit 5-0 - Initial length timer (Write Only)
             */
-            ch1_duty_cycle      = (value >> 6) & 0x3;
+            ch1_sqw.duty_cycle  = (value >> 6) & 0x3;
             ch1.len_timer       = value & 0x3F;
 
             reg[reg_id] = value;
@@ -256,9 +265,9 @@ int apu_write_register(u8 reg_id, u8 value) {
             
             // Writes to this register while the channel is on require retriggering it afterwards.
             if (!ch1.enabled) {
-                ch1_env_sweep_pace = value & 0x7;
-                ch1_env_positive = GET_BIT(value, 3);
-                ch1_env_vol = (value >> 4) & 0xF;
+                ch1_env.sweep_pace      = value & 0x7;
+                ch1_env.positive_flag   = GET_BIT(value, 3);
+                ch1_env.volume          = (value >> 4) & 0xF;
             }
 
             reg[reg_id] = value;
@@ -275,28 +284,28 @@ int apu_write_register(u8 reg_id, u8 value) {
             Bit 6   - Sound Length enable          (Read/Write) (1=Stop output when length in NR11 expires)
             Bit 2-0 - Period value's higher 3 bits (Write Only)
             */
-            ch1.frequency  = (ch1.frequency & 0x00FF) | ( ((u16)(value & 0x7) << 8) & 0xFFFF );
+            ch1.frequency   = (ch1.frequency & 0x00FF) | ( ((u16)(value & 0x7) << 8) & 0xFFFF );
             ch1.len_enabled = GET_BIT(value, 6);
             // trigger the channel
             if (GET_BIT(value, 7)) {
                 ch1.enabled = 1;
                 // frequency is copied to the shadow register.
-                ch1_freq_shadow = ch1.frequency;
+                ch1_sweep.freq_shadow = ch1.frequency;
                 // the internal enabled flag is set if either the sweep period or shift are non-zero, cleared otherwise.
-                ch1_sweep_enabled = (ch1_sweep_pace || ch1_sweep_shift);
+                ch1_sweep.enabled = (ch1_sweep.pace || ch1_sweep.shift);
                 // if the sweep shift is non-zero, frequency calculation and the overflow check are performed immediately.
-                if (ch1_sweep_shift != 0) 
+                if (ch1_sweep.shift != 0) 
                     ch1.frequency = calculate_ch1_sweep_frequency();
-                // if length counter is zero, it is set to 64 (256 for wave channel).
+                // if length counter is zero, it is set to 64.
                 if (ch1.len_timer == 64) ch1.len_timer = 0;
-                ch1_env_enabled = 1;
+                ch1_env.enabled = 1;
                 // activate parameters that required re-triggering to take effect
-                ch1_env_sweep_pace  = reg[REG_NR12] & 0x7;
-                ch1_env_positive    = GET_BIT(reg[REG_NR12], 3);
-                ch1_env_vol         = (reg[REG_NR12] >> 4) & 0xF;
+                ch1_env.sweep_pace      = reg[REG_NR12] & 0x7;
+                ch1_env.positive_flag   = GET_BIT(reg[REG_NR12], 3);
+                ch1_env.volume          = (reg[REG_NR12] >> 4) & 0xF;
                 // the sweep timer is reloaded.
-                ch1_env_sweep_counter = (ch1_env_sweep_pace == 0) ? 8 : ch1_env_sweep_pace;
-                ch1_sweep_counter = (ch1_sweep_pace == 0) ? 8 : ch1_sweep_pace;
+                ch1_env.sweep_counter   = (ch1_env.sweep_pace == 0) ? 8 : ch1_env.sweep_pace;
+                ch1_sweep.counter       = (ch1_sweep.pace == 0) ? 8 : ch1_sweep.pace;
 
                 ch1.timer = ((2048 - ch1.frequency) << 2);
 
@@ -312,7 +321,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             Bit 7-6 - Wave duty            (Read/Write)
             Bit 5-0 - Initial length timer (Write Only)
             */
-            ch2_duty_cycle      = (value >> 6) & 0x3;
+            ch2_sqw.duty_cycle  = (value >> 6) & 0x3;
             ch2.len_timer       = value & 0x3F;
 
             reg[reg_id] = value;
@@ -330,9 +339,9 @@ int apu_write_register(u8 reg_id, u8 value) {
             
             // Writes to this register while the channel is on require retriggering it afterwards.
             if (!ch2.enabled) {
-                ch2_env_sweep_pace = value & 0x7;
-                ch2_env_positive = GET_BIT(value, 3);
-                ch2_env_vol = (value >> 4) & 0xF;
+                ch2_env.sweep_pace      = value & 0x7;
+                ch2_env.positive_flag   = GET_BIT(value, 3);
+                ch2_env.volume          = (value >> 4) & 0xF;
             }
 
             reg[reg_id] = value;
@@ -349,7 +358,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             Bit 6   - Sound Length enable          (Read/Write) (1=Stop output when length in NR11 expires)
             Bit 2-0 - Period value's higher 3 bits (Write Only)
             */
-            ch2.frequency  = ( ((u16)(value & 0x7) << 8) & 0xFF00 ) | (ch2.frequency & 0x00FF);
+            ch2.frequency   = ( ((u16)(value & 0x7) << 8) & 0xFF00 ) | (ch2.frequency & 0x00FF);
             ch2.len_enabled = GET_BIT(value, 6);
             // trigger the channel
             if (GET_BIT(value, 7)) {
@@ -357,13 +366,13 @@ int apu_write_register(u8 reg_id, u8 value) {
 
                 // if length counter is zero, it is set to 64 (256 for wave channel).
                 if (ch2.len_timer == 64) ch2.len_timer = 0;
-                ch2_env_enabled = 1;
+                ch2_env.enabled = 1;
                 // activate parameters that required re-triggering to take effect
-                ch2_env_sweep_pace  = reg[REG_NR22] & 0x7;
-                ch2_env_positive    = GET_BIT(reg[REG_NR22], 3);
-                ch2_env_vol   = (reg[REG_NR22] >> 4) & 0xF;
+                ch2_env.sweep_pace      = reg[REG_NR22] & 0x7;
+                ch2_env.positive_flag   = GET_BIT(reg[REG_NR22], 3);
+                ch2_env.volume          = (reg[REG_NR22] >> 4) & 0xF;
                 // the sweep timer is reloaded.
-                ch2_env_sweep_counter = (ch2_env_sweep_pace == 0) ? 8 : ch2_env_sweep_pace;
+                ch2_env.sweep_counter   = (ch2_env.sweep_pace == 0) ? 8 : ch2_env.sweep_pace;
 
                 ch2.timer = ((2048 - ch2.frequency) << 2);
 
@@ -392,7 +401,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             %10	50% volume (shift samples read from Wave RAM right once)
             %11	25% volume (shift samples read from Wave RAM right twice)
             */
-            ch3_vol = (value >> 5) & 3;
+            ch3_wave.volume = (value >> 5) & 3;
             reg[reg_id] = value;
             break;
         case REG_NR33:
@@ -420,7 +429,7 @@ int apu_write_register(u8 reg_id, u8 value) {
 
                 ch3.timer = ((2048 - ch3.frequency) << 1);
                 if (ch3.len_timer == 256) ch3.len_timer = 0;
-                ch3_wave_position = 0;
+                ch3_wave.position = 0;
 
                 if (!ch3.dac_enabled)
                     ch3.enabled = 0;
@@ -447,9 +456,9 @@ int apu_write_register(u8 reg_id, u8 value) {
             
             // Writes to this register while the channel is on require retriggering it afterwards.
             if (!ch4.enabled) {
-                ch4_env_sweep_pace = value & 0x7;
-                ch4_env_positive = GET_BIT(value, 3);
-                ch4_env_vol = (value >> 4) & 0xF;
+                ch4_env.sweep_pace      = value & 0x7;
+                ch4_env.positive_flag   = GET_BIT(value, 3);
+                ch4_env.volume          = (value >> 4) & 0xF;
             }
 
             reg[reg_id] = value;
@@ -461,9 +470,9 @@ int apu_write_register(u8 reg_id, u8 value) {
             Bit 3   - LFSR width (0=15 bits, 1=7 bits)
             Bit 2-0 - Clock divider (r)
             */
-            ch4_clock_div = value & 7;
-            ch4_lfsr_width_mode = GET_BIT(value, 3);
-            ch4_clock_shift = (value >> 4) & 0xF;
+            ch4_noise.clock_div         = value & 7;
+            ch4_noise.lfsr_width_mode   = GET_BIT(value, 3);
+            ch4_noise.clock_shift       = (value >> 4) & 0xF;
 
             reg[reg_id] = value;
             break;
@@ -479,18 +488,18 @@ int apu_write_register(u8 reg_id, u8 value) {
                 ch4.enabled = 1;
 
                 if (ch4.len_timer == 64) ch4.len_timer = 0;
-                ch4_env_enabled = 1;
+                ch4_env.enabled = 1;
                 // activate parameters that required re-triggering to take effect
-                ch4_env_sweep_pace  = reg[REG_NR42] & 0x7;
-                ch4_env_positive    = GET_BIT(reg[REG_NR42], 3);
-                ch4_env_vol         = (reg[REG_NR42] >> 4) & 0xF;
+                ch4_env.sweep_pace      = reg[REG_NR42] & 0x7;
+                ch4_env.positive_flag   = GET_BIT(reg[REG_NR42], 3);
+                ch4_env.volume          = (reg[REG_NR42] >> 4) & 0xF;
                 // the sweep timer is reloaded.
-                ch4_env_sweep_counter = (ch4_env_sweep_pace == 0) ? 8 : ch4_env_sweep_pace;
+                ch4_env.sweep_counter   = (ch4_env.sweep_pace == 0) ? 8 : ch4_env.sweep_pace;
 
-                ch4.timer = nw_divisors[ch4_clock_div] << ch4_clock_shift;
+                ch4.timer = nw_divisors[ch4_noise.clock_div] << ch4_noise.clock_shift;
 
                 // noise channel's LFSR bits are all set to 1 (15 bit)
-                lfsr = 0x7FFF;
+                ch4_noise.lfsr = 0x7FFF;
 
                 if (!ch4.dac_enabled)
                     ch4.enabled = 0;
@@ -578,17 +587,6 @@ void apu_frame_sequencer_update() {
             update_envelope();
             break;
     }
-    /*
-    if (div_apu_counter % 2 == 0) {
-        // sound length event
-    }
-    if (div_apu_counter == 2 || div_apu_counter == 6) {
-        // ch1 freq sweep event
-    }
-    if (div_apu_counter == 7) {
-        // envelope sweep event
-    }
-    */
 }
 
 void ch1_tick() {
@@ -602,39 +600,33 @@ void ch1_tick() {
     if (ch1.timer <= timer_prev) {
         ch1.timer += ((2048 - ch1.frequency) << 2);
         // advance the duty cycle bit
-        ch1_sequence = (u8)(ch1_sequence + 1) & 7;
+        ch1_sqw.sequence = (u8)(ch1_sqw.sequence + 1) & 7;
         // fetch new output
-        if (ch1.enabled && GET_BIT(sw_duty_cycle[ch1_duty_cycle], ch1_sequence))
-            ch1.output = ch1_env_vol;
+        if (ch1.enabled && GET_BIT(sw_duty_cycle[ch1_sqw.duty_cycle], ch1_sqw.sequence))
+            ch1.output = ch1_env.volume;
         else
             ch1.output = 0;
 
         //printf("%d,", ch1.output);
     }
 }
-
 void ch2_tick() {
     u8 clock = M_CYCLE;
     u8 timer_prev = ch2.timer;
-
-    //if (!ch1.enabled) return;
 
     ch2.timer -= clock;
     // timer underflow
     if (ch2.timer <= timer_prev) {
         ch2.timer += ((2048 - ch2.frequency) << 2);
         // advance the duty cycle bit
-        ch2_sequence = (u8)(ch2_sequence + 1) & 7;
+        ch2_sqw.sequence = (u8)(ch2_sqw.sequence + 1) & 7;
         // fetch new output
-        if (ch2.enabled && GET_BIT(sw_duty_cycle[ch2_duty_cycle], ch2_sequence))
-            ch2.output = ch2_env_vol;
+        if (ch2.enabled && GET_BIT(sw_duty_cycle[ch2_sqw.duty_cycle], ch2_sqw.sequence))
+            ch2.output = ch2_env.volume;
         else
             ch2.output = 0;
-
-        //printf("%d,", ch2.output);
     }
 }
-
 void ch3_tick() {
     u8 clock = M_CYCLE;
     u8 timer_prev = ch3.timer;
@@ -643,22 +635,22 @@ void ch3_tick() {
     // timer underflow
     if (ch3.timer <= timer_prev) {
         ch3.timer += ((2048 - ch3.frequency) << 1);
+
         // advance the wave ram position
-        ch3_wave_position = (u8)(ch3_wave_position + 1) & 0x1F;
-        //printf("%d,", ch3_wave_position);
+        ch3_wave.position = (u8)(ch3_wave.position + 1) & 0x1F;
+
         // fetch new output
         if (ch3.enabled) {
-            u8 nibble_mask = ((ch3_wave_position & 1) == 0) ? 0xF0 : 0x0F;
-            u8 wave_val = reg[REG_WAVERAM + (ch3_wave_position >> 1)] & nibble_mask;
+            u8 nibble_mask = ((ch3_wave.position & 1) == 0) ? 0xF0 : 0x0F;
+            u8 wave_val = reg[REG_WAVERAM + (ch3_wave.position >> 1)] & nibble_mask;
             u8 volume = 0;
 
-            if ((ch3_wave_position & 1) == 0)
+            if ((ch3_wave.position & 1) == 0)
                 wave_val >>= 4;
 
             wave_val &= 0xF;
 
-            //printf("%d,", wave_val);
-            switch (ch3_vol) {
+            switch (ch3_wave.volume) {
                 /*
                 %00	Mute (No sound)
                 %01	100% volume (use samples read from Wave RAM as-is)
@@ -677,44 +669,36 @@ void ch3_tick() {
 
         // reload frequency
         ch3.frequency = ((((reg[REG_NR34] & 7) & 0xFF) << 8) & 0xFF00) | (reg[REG_NR33] & 0xFF);
-        //printf("%d,", ch3.output);
     }
 }
-
 void ch4_tick() {
     u8 clock = M_CYCLE;
     u8 timer_prev = ch4.timer;
-
-    //if (!ch1.enabled) return;
 
     ch4.timer -= clock;
     // timer underflow
     if (ch4.timer <= timer_prev) {
         u8 xor_val;
         // The noise channel's frequency timer period is set by a base divisor shifted left some number of bits. 
-        ch4.timer = (nw_divisors[ch4_clock_div] << ch4_clock_shift);
+        ch4.timer = (nw_divisors[ch4_noise.clock_div] << ch4_noise.clock_shift);
         // generate a pseudo-random sequence
-        xor_val = GET_BIT(lfsr, 0) ^ GET_BIT(lfsr, 1);
-        lfsr >>= 1;
-        lfsr = (lfsr & 0x3FFF) | (xor_val << 14);
+        xor_val = GET_BIT(ch4_noise.lfsr, 0) ^ GET_BIT(ch4_noise.lfsr, 1);
+        ch4_noise.lfsr >>= 1;
+        ch4_noise.lfsr = (ch4_noise.lfsr & 0x3FFF) | (xor_val << 14);
         // If width mode is 1, the XOR result is ALSO put into bit 6 AFTER the shift, resulting in a 7-bit LFSR
-        if (ch4_lfsr_width_mode == 1) {
-            lfsr = (lfsr & 0xFFBF) | (xor_val << 6);
+        if (ch4_noise.lfsr_width_mode == 1) {
+            ch4_noise.lfsr = (ch4_noise.lfsr & 0xFFBF) | (xor_val << 6);
         }
         // fetch new output
-        if (ch4.enabled && !GET_BIT(lfsr, 0))
-            ch4.output = ch4_env_vol;
+        if (ch4.enabled && !GET_BIT(ch4_noise.lfsr, 0))
+            ch4.output = ch4_env.volume;
         else
             ch4.output = 0;
-
-        //printf("%d,", ch4.output);
     }
 }
 
-//ch4.timer = nw_divisors[ch4_clock_div] << ch4_clock_shift;
 
 void apu_tick() {
-
     if (!apu_enabled) return;
 
     ch1_tick();
@@ -726,13 +710,13 @@ void apu_tick() {
     if (sample_timer >= sample_frequency) {
         // Generates an audio sample and outputs it to SDL
         float output;
-        
-        apu_counter++;
+
         sample_timer -= sample_frequency;
 
         // when speeding up the emulator, only collect every Nth sample
-        if (apu_counter % gb_frameskip != 0) return;
-        // gather sample
+        if (apu_counter++ % gb_frameskip != 0) return;
+        
+        // TODO add stereo (mono only)
         output = (ch1.output + ch2.output + ch3.output + ch4.output) * 2.0f;
         output = output * ((float)(vol_l + vol_r) / 14.0f);
 
@@ -747,34 +731,34 @@ void apu_tick() {
 // PRIVATE  -------------------------------------------------
 
 void update_ch1_sweep() {
-    if (ch1.enabled && ch1_sweep_counter > 0) {
-        ch1_sweep_counter--;
-        if (ch1_sweep_counter == 0) {
-            ch1_sweep_counter = ch1_sweep_pace;
+    if (ch1.enabled && ch1_sweep.counter > 0) {
+        ch1_sweep.counter--;
+        if (ch1_sweep.counter == 0) {
+            ch1_sweep.counter = ch1_sweep.pace;
             
             // The volume envelope and sweep timers treat a period of 0 as 8.
-            if (ch1_sweep_pace == 0)
-                ch1_sweep_counter = 8; 
+            if (ch1_sweep.pace == 0)
+                ch1_sweep.counter = 8; 
 
-            if (ch1_sweep_enabled) {
+            if (ch1_sweep.enabled) {
                 /* If the new frequency is 2047 or less and the sweep shift is not zero, 
                 this new frequency is written back to the shadow frequency and square 1's frequency in NR13 and NR14, 
                 then frequency calculation and overflow check are run AGAIN immediately using this new value, 
                 but this second new frequency is not written back. */
                 u16 freq_new = calculate_ch1_sweep_frequency();
-                if (freq_new <= 2047 && ch1_sweep_shift != 0) {
+                if (freq_new <= 2047 && ch1_sweep.shift != 0) {
                     ch1.frequency = freq_new;
                     reg[REG_NR13] = freq_new & 0xFF;
                     reg[REG_NR14] = (reg[REG_NR14] & 0x1F) | ((freq_new >> 8) & 0xFF);
 
-                    ch1_freq_shadow = freq_new;
+                    ch1_sweep.freq_shadow = freq_new;
                     calculate_ch1_sweep_frequency();
                 }
             }
         }
     }
     // reload the sweep pace after this interation
-    ch1_sweep_pace = (reg[REG_NR10] >> 4) & 0x7;
+    ch1_sweep.pace = (reg[REG_NR10] >> 4) & 0x7;
 }
 
 u16 calculate_ch1_sweep_frequency() {
@@ -784,9 +768,9 @@ u16 calculate_ch1_sweep_frequency() {
     What is done with this new frequency depends on the context.
     The overflow check simply calculates the new frequency and if this is greater than 2047, square 1 is disabled. */
     u16 freq_new;
-    u16 shift_val = ch1_freq_shadow >> ch1_sweep_shift;
+    u16 shift_val = ch1_sweep.freq_shadow >> ch1_sweep.shift;
     
-    freq_new = ch1_sweep_negative ? ch1_freq_shadow - shift_val : ch1_freq_shadow + shift_val;
+    freq_new = ch1_sweep.negative_flag ? ch1_sweep.freq_shadow - shift_val : ch1_sweep.freq_shadow + shift_val;
 
     if (freq_new > 2047)
         ch1.enabled = 0;
@@ -795,79 +779,79 @@ u16 calculate_ch1_sweep_frequency() {
 }
 
 void update_envelope() {
-    if (ch1.enabled && ch1_env_sweep_counter > 0) {
-        ch1_env_sweep_counter--;
-        if (ch1_env_sweep_counter == 0) {
-            ch1_env_sweep_counter = ch1_env_sweep_pace;
+    if (ch1.enabled && ch1_env.sweep_counter > 0) {
+        ch1_env.sweep_counter--;
+        if (ch1_env.sweep_counter == 0) {
+            ch1_env.sweep_counter = ch1_env.sweep_pace;
             
             // The volume envelope and sweep timers treat a period of 0 as 8.
-            if (ch1_env_sweep_pace == 0)
-                ch1_env_sweep_counter = 8; 
+            if (ch1_env.sweep_pace == 0)
+                ch1_env.sweep_counter = 8; 
 
-            if (ch1_env_enabled && ch1_env_sweep_pace > 0) {
-                if (ch1_env_positive && ch1_env_vol < 15) {
-                    ch1_env_vol++;
-                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch1_env_vol << 4);
+            if (ch1_env.enabled && ch1_env.sweep_pace > 0) {
+                if (ch1_env.positive_flag && ch1_env.volume < 15) {
+                    ch1_env.volume++;
+                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch1_env.volume << 4);
                 }
-                else if (!ch1_env_positive && ch1_env_vol > 0) {
-                    ch1_env_vol--;
-                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch1_env_vol << 4);
+                else if (!ch1_env.positive_flag && ch1_env.volume > 0) {
+                    ch1_env.volume--;
+                    reg[REG_NR12] = (reg[REG_NR12] & 0xF) | (ch1_env.volume << 4);
                 }
             }
 
-            if (ch1_env_vol == 0 || ch1_env_vol == 15)
-                ch1_env_enabled = 0;
+            if (ch1_env.volume == 0 || ch1_env.volume == 15)
+                ch1_env.enabled = 0;
         }
     }
 
-    if (ch2.enabled && ch2_env_sweep_counter > 0) {
-        ch2_env_sweep_counter--;
-        if (ch2_env_sweep_counter == 0) {
-            ch2_env_sweep_counter = ch2_env_sweep_pace;
+    if (ch2.enabled && ch2_env.sweep_counter > 0) {
+        ch2_env.sweep_counter--;
+        if (ch2_env.sweep_counter == 0) {
+            ch2_env.sweep_counter = ch2_env.sweep_pace;
             
             // The volume envelope and sweep timers treat a period of 0 as 8.
-            if (ch2_env_sweep_pace == 0)
-                ch2_env_sweep_counter = 8; 
+            if (ch2_env.sweep_pace == 0)
+                ch2_env.sweep_counter = 8; 
 
-            if (ch2_env_enabled && ch2_env_sweep_pace > 0) {
-                if (ch2_env_positive && ch2_env_vol < 15) {
-                    ch2_env_vol++;
-                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env_vol << 4);
+            if (ch2_env.enabled && ch2_env.sweep_pace > 0) {
+                if (ch2_env.positive_flag && ch2_env.volume < 15) {
+                    ch2_env.volume++;
+                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env.volume << 4);
                 }
-                else if (!ch2_env_positive && ch2_env_vol > 0) {
-                    ch2_env_vol--;
-                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env_vol << 4);
+                else if (!ch2_env.positive_flag && ch2_env.volume > 0) {
+                    ch2_env.volume--;
+                    reg[REG_NR22] = (reg[REG_NR22] & 0xF) | (ch2_env.volume << 4);
                 }
             }
 
-            if (ch2_env_vol == 0 || ch2_env_vol == 15)
-                ch2_env_enabled = 0;
+            if (ch2_env.volume == 0 || ch2_env.volume == 15)
+                ch2_env.enabled = 0;
         }
     }
 
-    if (ch4.enabled && ch4_env_sweep_counter > 0) {
-        ch4_env_sweep_counter--;
-        if (ch4_env_sweep_counter == 0) {
-            ch4_env_sweep_counter = ch4_env_sweep_pace;
+    if (ch4.enabled && ch4_env.sweep_counter > 0) {
+        ch4_env.sweep_counter--;
+        if (ch4_env.sweep_counter == 0) {
+            ch4_env.sweep_counter = ch4_env.sweep_pace;
             
             // The volume envelope and sweep timers treat a period of 0 as 8.
-            if (ch4_env_sweep_pace == 0)
-                ch4_env_sweep_counter = 8; 
+            if (ch4_env.sweep_pace == 0)
+                ch4_env.sweep_counter = 8; 
 
-            if (ch4_env_enabled && ch4_env_sweep_pace > 0) {
-                if (ch4_env_positive && ch4_env_vol < 15) {
-                    ch4_env_vol++;
-                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
+            if (ch4_env.enabled && ch4_env.sweep_pace > 0) {
+                if (ch4_env.positive_flag && ch4_env.volume < 15) {
+                    ch4_env.volume++;
+                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env.volume << 4);
                 }
-                else if (!ch4_env_positive && ch4_env_vol > 0) {
-                    ch4_env_vol--;
-                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env_vol << 4);
+                else if (!ch4_env.positive_flag && ch4_env.volume > 0) {
+                    ch4_env.volume--;
+                    reg[REG_NR42] = (reg[REG_NR42] & 0xF) | (ch4_env.volume << 4);
                 }
-                //printf("%d,", ch4_env_vol);
+                //printf("%d,", ch4_env.volume);
             }
 
-            if (ch4_env_vol == 0 || ch4_env_vol == 15)
-                ch4_env_enabled = 0;
+            if (ch4_env.volume == 0 || ch4_env.volume == 15)
+                ch4_env.enabled = 0;
         }
     }
 }
@@ -947,40 +931,20 @@ void turn_off() {
     vol_l = 0; vol_r = 0;
     vin_pan_l = 0; vin_pan_r = 0;
 
-    ch1_sweep_pace = 0;
-    ch1_sweep_negative = 0;
-    ch1_sweep_shift = 0;
-    ch1_sweep_counter = 0;
-    ch1_sweep_enabled = 0;
-    ch1_freq_shadow = 0;
+    // Clear all channel variables
+    memset(&ch1,        0, sizeof(SoundChannel));
+    memset(&ch1_env,    0, sizeof(Envelope));
+    memset(&ch1_sqw,    0, sizeof(SquareWave));
+    memset(&ch1_sweep,  0, sizeof(FrequencySweep));
 
-    ch1_duty_cycle = 0;
-    ch1_sequence = 0;
-    ch1_env_sweep_pace = 0;
-    ch1_env_positive = 0;
-    ch1_env_vol = 0;
-    ch1_env_sweep_counter = 0;
-    ch1_env_enabled = 0;
+    memset(&ch2,        0, sizeof(SoundChannel));
+    memset(&ch2_env,    0, sizeof(Envelope));
+    memset(&ch2_sqw,    0, sizeof(SquareWave));
 
-    ch2_duty_cycle = 0;
-    ch2_sequence = 0;
-    ch2_env_sweep_pace = 0; 
-    ch2_env_positive = 0;
-    ch2_env_vol = 0;
-    ch2_env_sweep_counter = 0;
-    ch2_env_enabled = 0;
+    memset(&ch3,        0, sizeof(SoundChannel));
+    memset(&ch3_wave,   0, sizeof(Wave));
 
-    ch3_vol = 0;
-    ch3_wave_position = 0;
-
-    lfsr = 0;
-    ch4_clock_div = 0;
-    ch4_lfsr_width_mode = 0;
-    ch4_clock_shift = 0;
-
-    ch4_env_sweep_pace = 0;
-    ch4_env_positive = 0;
-    ch4_env_vol = 0;
-    ch4_env_sweep_counter = 0;
-    ch4_env_enabled = 0;
+    memset(&ch4,        0, sizeof(SoundChannel));
+    memset(&ch4_env,    0, sizeof(Envelope));
+    memset(&ch4_noise,  0, sizeof(Noise));
 }

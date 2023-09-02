@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+
 #include "emu_shared.h"
 
 #include "gb.h"
@@ -21,22 +22,23 @@ typedef struct {
     u8 priority;
 } ObjectPriority;
 
-u8* lcd_buffer  = NULL;
+u8* lcd_buffer;
+u8 redraw_flag;         // when true screen will be redrawn at the end of the frame
 
-u8 redraw_flag;
+u8  vram_accessible;    // (unused) whether the VRAM is accessible for reading (PPU only)
 
-u8  vram_accessible;  // whether the VRAM is accessible for reading (PPU only)
+u16 scanline_counter;   // every >SCANLINE_DOTS, update LY
+u8  window_line;        // window LY
+u16 lcd_mode_next;      // determines after what cycle (scanline_counter) to switch lcd_mode
 
-u16 scanline_counter; // every >SCANLINE_DOTS, update LY
-u8  window_counter;
-u16 lcd_mode_next;    // determines when (scanline_counter) to switch lcd_mode
 ObjectPriority objects[40]; // array of object indexes that intersect with of the current scanline
-u8  object_count;     // how many objects to read from the array
+u8  object_count;       // how many objects to read from the array
 
 // Drawing optimization
 int vblank_counter  = 0;
 u16 tm_addr_prev    = 0;
 
+// Palette data
 u8  pal_bgp[4]      = { 0, 1, 2, 3 };
 u8  pal_obp0[4]     = { 0, 1, 2, 3 };
 u8  pal_obp1[4]     = { 0, 1, 2, 3 };
@@ -46,13 +48,13 @@ u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 debug_show_line_data = 0;
 
 // FORWARD DECLARE
-void draw_scanline(u8 y);
-void draw_tiles(u8 y);
-void draw_objects(u8 y);
-u8 search_oam(u8 y);
+void draw_scanline(u8);
+void draw_tiles(u8);
+void draw_objects(u8);
+u8   search_oam(u8);
 void check_lyc();
-void check_stat_irq(u8 stat_int_source);
-void update_palette(u8 reg, u8 value);
+void check_stat_irq(u8);
+void update_palette(u8, u8);
 void disable_lcd();
 void enable_lcd();
 
@@ -64,6 +66,7 @@ int ppu_init()
     // Allocate memory for the buffer and initialize with 0
     int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
     
+    lcd_buffer = NULL;
     lcd_buffer = (u8*)calloc(buffer_size, sizeof(u8));
     if (lcd_buffer == NULL)
     {
@@ -117,6 +120,7 @@ u8* ppu_get_pixel_buffer()
 
 // Whether the screen needs to be redrawn
 u8 ppu_get_redraw_flag() {
+    // even if true, dont draw when frame is skipped
     return redraw_flag && (vblank_counter % gb_frameskip == 0);
 }
 
@@ -143,12 +147,10 @@ void ppu_write_register(u8 reg_id, u8 value) {
             if (GET_BIT(reg[REG_LCDC], 7) && lcd_mode != LCD_MODE_VBLANK && !GET_BIT(value, 7)) {
                 printf("illegal LCD disable\n");
             }
-            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7))
-            {
+            if (GET_BIT(reg[REG_LCDC], 7) && !GET_BIT(value, 7)) {
                 disable_lcd();
             }
             else if (!GET_BIT(reg[REG_LCDC], 7) && GET_BIT(value, 7)) {
-                //printf("lcd enabled\n");
                 enable_lcd();
             }
             reg[REG_LCDC] = value;
@@ -158,26 +160,18 @@ void ppu_write_register(u8 reg_id, u8 value) {
             // On DMG, a STAT write causes all sources to be enabled (but not necessarily active) for one cycle.
             // call your STAT IRQ poll function, then set STAT enable flags to their true values.
                             
-            // the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
+            // TODO the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
             // so it does not block if Mode 0 is enabled as well.
             reg[REG_STAT] = value ;
-            if (lcd_enabled) {
-                if (!cgb_mode) {
-                    stat_bug = 1;
-                    check_stat_irq(0);
-                    stat_bug = 0;
-                }
+            if (lcd_enabled && !cgb_mode) {
+                stat_bug = 1;
+                check_stat_irq(0);
+                stat_bug = 0;
             }
-            break;
-        case REG_SCX:
-            if (value == 32) {
-                //debug_show_tracelog = 1;
-            }
-            reg[REG_SCX] = value;
             break;
         case REG_LY: 
             if (lcd_enabled) reg[REG_LY] = 0;
-            break; // read only
+            break;
         case REG_LYC:
             reg[REG_LYC] = value;
 
@@ -218,32 +212,23 @@ void oam_dma_transfer_tick() {
     oam_dma_access_flag = 0;
 
     oam[oam_dma_index] = t_u8;
-    oam_dma_index++;
 
-    if (oam_dma_index > 0x9F) {
+    if (++oam_dma_index > 0x9F) {
         oam_dma_index = 0;
         oam_dma_transfer_flag = 0;
     }
 }
 
-u8 ct = 0;
 void ppu_tick()
 {
     u8 clock = M_CYCLE;
 
     if (!lcd_enabled) return;
 
-    /*
-    ct++;
-    if (ct % 10 == 0)
-        printf("%d,", stat_irq_flag);
-        */
-    //check_stat_irq(0);
-
-
     scanline_counter += clock;
     if (scanline_counter < lcd_mode_next) return;
 
+    // Switch lcd mode
     switch (lcd_mode) {
         case LCD_MODE_OAM: // Searching OAM for OBJs whose Y coordinate overlap this line
             reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VRAM;
@@ -323,7 +308,7 @@ void ppu_tick()
             if (reg[REG_LY] >= 154) {
                 // reset line
                 reg[REG_LY] = 0;
-                window_counter = 0;
+                window_line = 0;
 
                 // obscure behavior
                 if (cgb_mode && !double_speed) {
@@ -355,9 +340,7 @@ void ppu_tick()
 
 void ppu_cleanup()
 {
-    if (lcd_buffer) {
-        free(lcd_buffer);
-    }
+    if (lcd_buffer) free(lcd_buffer);
 }
 
 
@@ -393,21 +376,21 @@ void disable_lcd() {
     RESET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE);
     RESET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE);
     reg[REG_LY] = 0;
+    window_line = 0;
+
     vblank_counter = 0;
     scanline_counter = 0;
-    window_counter = 0;
 
-    // request hblank interrupt if enabled
-    check_stat_irq(STAT_INT_HBLANK);
-    
     reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
-    
     lcd_mode = LCD_MODE_HBLANK;
     lcd_mode_next = SCANLINE_DOTS;
+
+    // request hblank interrupt if enabled
+    check_stat_irq(0);
     
     vram_accessible = 0;
 
-    memset(lcd_buffer, MEM_ROM_0, buffer_size);
+    memset(lcd_buffer, 0, buffer_size);
 }
 void enable_lcd() {
     lcd_enabled = 1;
@@ -544,9 +527,9 @@ void draw_tiles(u8 y) {
 
         win_tm_area = GET_BIT(reg[REG_LCDC], LCDC_W_TILEMAP_AREA) ? 0x9C00 : 0x9800;
         // get window position relative to screen 
-        win_y       = ( (window_counter & 0xFF) >> 3) << 5;
-        win_row     = (window_counter & 0xFF) % 8;
-        window_counter++;
+        win_y       = ( (window_line & 0xFF) >> 3) << 5;
+        win_row     = (window_line & 0xFF) % 8;
+        window_line++;
 
         // check if window covers the entire background
         if (wx <= 7 && wy <= 0) {
@@ -649,7 +632,6 @@ void draw_objects(u8 y) {
         u8 tile_index   = obj_height == 16 ? (oam[index + 2] & 0xFE) : oam[index + 2];
         u8 attr         = oam[index + 3];
         u8 palette_no, flip_x, flip_y, bg_over_obj;
-        u8 pixel_updated = 0;
 
         u8 byte1, byte2;
         u8 color_index;

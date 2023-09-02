@@ -476,8 +476,7 @@ void cpu_write_memory(u16 addr, u8 value) {
     tick(); // advance the clock 1 M-cycle
 }
 
-u8 cpu_update()
-{
+u8 cpu_update() {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
 

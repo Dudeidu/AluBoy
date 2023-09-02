@@ -78,16 +78,15 @@ void timer_write_register(u8 reg_id, u8 value)
                 case 0: timer_speed = 1024; timer_clock_bit = 9; break;
                 case 1: timer_speed = 16;   timer_clock_bit = 3; break;
                 case 2: timer_speed = 64;   timer_clock_bit = 5; break;
-                case 3: timer_speed = 256;  timer_clock_bit = 7;  break;
+                case 3: timer_speed = 256;  timer_clock_bit = 7; break;
             }
             // bit 2: Enable timer
             // When disabling the timer, if the corresponding bit in the system counter is set to 1, the falling edge
             // detector will see a change from 1 to 0, so TIMA will increase.
 
             if (timer_enabled && !GET_BIT(value, 2)) {
-                if (GET_BIT(internal_counter, timer_clock_bit)) {
+                if (GET_BIT(internal_counter, timer_clock_bit))
                     tima_inc();
-                }
             }
             timer_enabled = GET_BIT(value, 2);
 
@@ -108,21 +107,21 @@ void timer_tick() {
 
     // TIMA reload delay
     if (tima_reload_delay > 0) {
-        if ((s8)tima_reload_delay - clock >= 0) tima_reload_delay -= clock;
-        else {
+        if ((s8)tima_reload_delay - clock >= 0) 
+            tima_reload_delay -= clock;
+        else 
             tima_reload_delay = 0;
-        }
+
         // Timer interrupt
-        if (tima_reload_delay == 0) {
+        if (tima_reload_delay == 0)
             SET_BIT(reg[REG_IF], INT_BIT_TIMER);
-        }
     }
 
     // TIMA is incremented when detecting a falling edge from ANDing the enable bit in TAC with the bit of the system internal counter
     timer_inc_check_new = timer_enabled & GET_BIT(internal_counter, timer_clock_bit);
-    if (timer_inc_check_old && !timer_inc_check_new) {
+    if (timer_inc_check_old && !timer_inc_check_new)
         tima_inc();
-    }
+
     //printf("DIV: %d, TIMA: %d\n", reg[REG_DIV], reg[REG_TIMA]);
 
 }
