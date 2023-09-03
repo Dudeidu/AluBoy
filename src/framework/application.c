@@ -30,7 +30,7 @@ int     fps = 60;
 double  tick_rate; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "metroid ii";
+const char* rom_file_name = "pokemon red";
 const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
 /* 

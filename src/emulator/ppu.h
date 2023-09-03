@@ -10,6 +10,7 @@ u8  oam_dma_access_flag;    // allows bypassing the DMA memory blocking when its
 u8  oam_dma_index;          // 0x00-0x9F
 
 u8  stat_irq_flag;          // STAT register interrupt request
+u8  stat_irq_line;
 u8  stat_bug;               // if true, all STAT flags are enabled for 1 cycle
 
 u8  lcd_enabled;

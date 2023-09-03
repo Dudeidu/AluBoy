@@ -410,11 +410,11 @@ u8 cpu_read_memory(u16 addr) {
             }
             // Unusable area
             else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
-                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
-                //{
-                //    // TODO OAM corruption
-                //    return 0xFF;
-                //}
+                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
+                {
+                    // TODO OAM corruption
+                    return 0xFF;
+                }
                 return 0x00;
             }
             // High RAM

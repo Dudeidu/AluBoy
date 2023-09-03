@@ -23,6 +23,8 @@ typedef struct {
 } ObjectPriority;
 
 u8* lcd_buffer;
+u8* lcd_index_buffer;   // internal buffer that keeps the color index (instead of the palette index)
+
 u8 redraw_flag;         // when true screen will be redrawn at the end of the frame
 
 u8  vram_accessible;    // (unused) whether the VRAM is accessible for reading (PPU only)
@@ -70,13 +72,20 @@ int ppu_init()
     lcd_buffer = (u8*)calloc(buffer_size, sizeof(u8));
     if (lcd_buffer == NULL)
     {
-        fprintf(stderr, "Failed to allocate memory for the background buffer!\n");
+        fprintf(stderr, "Failed to allocate memory for the LCD buffer!\n");
+        return 0;
+    }
+
+    lcd_index_buffer = NULL;
+    lcd_index_buffer = (u8*)calloc(buffer_size, sizeof(u8));
+    if (lcd_index_buffer == NULL)
+    {
+        fprintf(stderr, "Failed to allocate memory for the LCD index buffer!\n");
         return 0;
     }
 
     return 1;
 }
-
 void ppu_powerup()
 {
     lcd_mode = LCD_MODE_VBLANK;
@@ -123,10 +132,10 @@ u8 ppu_get_redraw_flag() {
     // even if true, dont draw when frame is skipped
     return redraw_flag && (vblank_counter % gb_frameskip == 0);
 }
-
 void ppu_set_redraw_flag(u8 val) {
     redraw_flag = val;
 }
+
 
 u8 ppu_read_register(u8 reg_id) {
     // handles special cases
@@ -139,7 +148,6 @@ u8 ppu_read_register(u8 reg_id) {
             return reg[reg_id];
     }
 }
-
 void ppu_write_register(u8 reg_id, u8 value) {
     // handles special cases
     switch (reg_id) {
@@ -154,6 +162,7 @@ void ppu_write_register(u8 reg_id, u8 value) {
                 enable_lcd();
             }
             reg[REG_LCDC] = value;
+            
             break;
         case REG_STAT:
             // STAT irq blocking / bug
@@ -162,7 +171,7 @@ void ppu_write_register(u8 reg_id, u8 value) {
                             
             // TODO the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
             // so it does not block if Mode 0 is enabled as well.
-            reg[REG_STAT] = value ;
+            reg[REG_STAT] = (reg[REG_STAT] & 7) | (value & 0x78); // bits 0-2 are read only, bit 7 is unused
             if (lcd_enabled && !cgb_mode) {
                 stat_bug = 1;
                 check_stat_irq(0);
@@ -205,6 +214,7 @@ void ppu_write_register(u8 reg_id, u8 value) {
             break;
     }
 }
+
 
 void oam_dma_transfer_tick() {
     oam_dma_access_flag = 1;
@@ -275,12 +285,12 @@ void ppu_tick()
                 // Vblank period start
                 vblank_counter++;
 
-                // Vblank interrupt request
-                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
-
                 lcd_mode = LCD_MODE_VBLANK;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VBLANK;
                 lcd_mode_next = SCANLINE_DOTS;
+
+                // Vblank interrupt request
+                SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
 
                 // request stat interrupt if enabled
                 check_stat_irq(1);
@@ -341,6 +351,7 @@ void ppu_tick()
 void ppu_cleanup()
 {
     if (lcd_buffer) free(lcd_buffer);
+    if (lcd_index_buffer) free(lcd_index_buffer);
 }
 
 
@@ -391,6 +402,7 @@ void disable_lcd() {
     vram_accessible = 0;
 
     memset(lcd_buffer, 0, buffer_size);
+    memset(lcd_index_buffer, 0, buffer_size);
 }
 void enable_lcd() {
     lcd_enabled = 1;
@@ -415,12 +427,12 @@ int compare_object_by_priority(const void* a, const void* b) {
 
 // Request stat interrupt if source is enabled
 void check_stat_irq(u8 vblank_start) {
-    if (stat_bug || (
-        (lcd_mode == LCD_MODE_HBLANK && GET_BIT(reg[REG_STAT], STAT_INT_HBLANK) ) ||
-        (lcd_mode == LCD_MODE_VBLANK && GET_BIT(reg[REG_STAT], STAT_INT_VBLANK) ) ||
-        ((lcd_mode == LCD_MODE_OAM || vblank_start) && GET_BIT(reg[REG_STAT], STAT_INT_OAM) ) ||
-        (GET_BIT(reg[REG_STAT], 2)   && GET_BIT(reg[REG_STAT], STAT_INT_LYC)    )
-        )) {
+    if  (stat_bug || 
+        (lcd_mode == LCD_MODE_HBLANK && GET_BIT(reg[REG_STAT], STAT_INT_HBLANK) ) || // HBlank
+        (lcd_mode == LCD_MODE_VBLANK && GET_BIT(reg[REG_STAT], STAT_INT_VBLANK) ) || // VBlank
+        ((lcd_mode == LCD_MODE_OAM || vblank_start) && GET_BIT(reg[REG_STAT], STAT_INT_OAM) ) || // OAM
+        (GET_BIT(reg[REG_STAT], 2)   && GET_BIT(reg[REG_STAT], STAT_INT_LYC)    ) // LYC
+        ) {
         if (!stat_irq_flag) {
             SET_BIT(reg[REG_IF], INT_BIT_STAT);
             stat_irq_flag = 1;
@@ -429,6 +441,12 @@ void check_stat_irq(u8 vblank_start) {
     else {
         stat_irq_flag = 0;
     }
+}
+
+// Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
+void check_lyc() {
+    if (reg[REG_LY] == reg[REG_LYC]) SET_BIT(reg[REG_STAT], 2);
+    else RESET_BIT(reg[REG_STAT], 2);
 }
 
 // Searching OAM for OBJs whose Y coordinate overlap this scanline and stores them an a sorted array.
@@ -465,12 +483,6 @@ u8 search_oam(u8 y) {
     return count;
 }
 
-// Check for coincidence interrupt (if LYC=LY and interrupt is enabled)
-void check_lyc() {
-    if (reg[REG_LY] == reg[REG_LYC]) SET_BIT(reg[REG_STAT], 2);
-    else RESET_BIT(reg[REG_STAT], 2);
-}
-
 void draw_scanline(u8 y) {
     if (debug_show_line_data) printf("line:%03d bg?:%d obj?:%d ", y, GET_BIT( reg[REG_LCDC], LCDC_BGW_ENABLE), GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE));
     
@@ -487,9 +499,9 @@ void draw_scanline(u8 y) {
     }
     if (debug_show_line_data) printf("\n");
 }
-
-// Draws the Background & Window
 void draw_tiles(u8 y) {
+    // Draws the Background & Window
+    
     u16 y_screen_width = y * SCREEN_WIDTH;
     
     u8  sx      = reg[REG_SCX];
@@ -595,6 +607,8 @@ void draw_tiles(u8 y) {
         pixel_pos = x + y_screen_width;
         if (lcd_buffer[pixel_pos] != pal_bgp[color_index]) {
             lcd_buffer[pixel_pos] = pal_bgp[color_index];
+            lcd_index_buffer[pixel_pos] = color_index;
+
             // Tell screen to redraw at the next step
             if (!redraw_flag) redraw_flag = 1;
 
@@ -612,7 +626,6 @@ void draw_tiles(u8 y) {
 
     if (debug_show_line_data) printf("sx:%03d sy:%03d wx:%03d wy:%03d w_inline:%d bg_inline:%d winp:%d bgp:%d ", sx, sy, wx, wy, window_in_line, bg_in_line, win_pixels, bg_pixels);
 }
-
 void draw_objects(u8 y) {
     if (object_count == 0) return;
 
@@ -642,7 +655,7 @@ void draw_objects(u8 y) {
         u8* palette;
 
         // check if outside screen
-        if (xpos == 0 || xpos >= 168) { continue; }
+        if (xpos >= 168 || xpos == 0) { continue; }
         
         ty = (y - (ypos - 16));
         flip_y = GET_BIT(attr, OAM_Y_FLIP);
@@ -672,10 +685,12 @@ void draw_objects(u8 y) {
             pixel_pos = px + y_screen_width;
 
             // BG and Window colors 1-3 over the OBJ
-            if (bg_over_obj && lcd_buffer[pixel_pos] != 0) continue;
+            if (bg_over_obj && lcd_index_buffer[pixel_pos] != 0) continue;
 
             if (lcd_buffer[pixel_pos] != palette[color_index]) {
                 lcd_buffer[pixel_pos] = palette[color_index];
+                lcd_index_buffer[pixel_pos] = color_index;
+
                 // Tell screen to redraw at the next step
                 if (!redraw_flag) redraw_flag = 1;
             }
