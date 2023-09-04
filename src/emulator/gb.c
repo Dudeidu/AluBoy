@@ -44,6 +44,7 @@ int gb_init(u8* rom_buffer) {
     }
 
     gb_frameskip = 1;
+    gb_debug_show_tracelog = 0;
 
     return 1;
 }

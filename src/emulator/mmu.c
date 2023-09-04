@@ -491,10 +491,13 @@ void write(u16 addr, u8 value)
                     if (reg_id >= REG_DIV && reg_id <= REG_TAC)
                         timer_write_register(reg_id, value);
                     // APU registers ( TODO 0X76 0x77 for cgb-only PCM registers)
-                    else if (reg_id >= REG_NR10 && reg_id < REG_LCDC)
+                    else if (  (reg_id >= REG_NR10  && reg_id < REG_LCDC    )
+                            || (reg_id >= REG_PCM12 && reg_id <= REG_PCM34  )  )
                         apu_write_register(reg_id, value);
                     // PPU registers
-                    else if ((reg_id >= REG_LCDC && reg_id <= REG_WX) || (reg_id >= REG_BGPI && reg_id <= REG_OPRI))
+                    else if (  (reg_id >= REG_LCDC  && reg_id <= REG_WX     ) 
+                            || (reg_id >= REG_VBK   && reg_id <= REG_HDMA5  )
+                            || (reg_id >= REG_BGPI  && reg_id <= REG_OPRI   )  )
                         ppu_write_register(reg_id, value);
                     // CPU registers
                     else

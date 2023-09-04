@@ -171,18 +171,24 @@ void ppu_write_register(u8 reg_id, u8 value) {
                             
             // TODO the LYC coincidence interrupt appears to be delayed by 1 cycle after Mode 2, 
             // so it does not block if Mode 0 is enabled as well.
-            reg[REG_STAT] = (reg[REG_STAT] & 7) | (value & 0x78); // bits 0-2 are read only, bit 7 is unused
+            reg[REG_STAT] = (reg[reg_id] & 7) | (value & 0x78) | 0x80; // bits 0-2 are read only, bit 7 is unused
             if (lcd_enabled && !cgb_mode) {
                 stat_bug = 1;
                 check_stat_irq(0);
                 stat_bug = 0;
             }
             break;
+        case REG_SCY:
+            reg[reg_id] = value;
+            break;
+        case REG_SCX:
+            reg[reg_id] = value;
+            break;
         case REG_LY: 
-            if (lcd_enabled) reg[REG_LY] = 0;
+            if (lcd_enabled) reg[reg_id] = 0;
             break;
         case REG_LYC:
-            reg[REG_LYC] = value;
+            reg[reg_id] = value;
 
             if (lcd_enabled) {
                 check_lyc();
@@ -192,25 +198,57 @@ void ppu_write_register(u8 reg_id, u8 value) {
         case REG_DMA:
             // Source:      $XX00-$XX9F   ;XX = $00 to $DF
             // Destination: $FE00-$FE9F
-            reg[REG_DMA] = value;
+            reg[reg_id] = value;
             oam_dma_transfer_flag = 1;
             break;
         case REG_BGP:
             update_palette(REG_BGP, value);
+            reg[reg_id] = value;
             break;
         case REG_OBP0:
             update_palette(REG_OBP0, value);
+            reg[reg_id] = value;
             break;
         case REG_OBP1:
             update_palette(REG_OBP1, value);
+            reg[reg_id] = value;
             break;
+        case REG_WY:
+            reg[reg_id] = value;
+            break;
+        case REG_WX:
+            reg[reg_id] = value;
+            break;
+        case REG_VBK:
+            if (cgb_mode)   reg[reg_id] = value;
+            else            reg[reg_id] = 0xFF;
+            break;
+        case REG_HDMA1:
+        case REG_HDMA2:
+        case REG_HDMA3:
+        case REG_HDMA4:
+        case REG_HDMA5:
+            if (cgb_mode)   reg[reg_id] = value;
+            else            reg[reg_id] = 0xFF;
+            break;
+        case REG_BGPI:
+        case REG_BGPD:
+        case REG_OBPI:
+        case REG_OPRI:
+            if (cgb_mode)   reg[reg_id] = value;
+            else            reg[reg_id] = 0xFF;
+            break;
+
         case REG_OBPD:
-            if (lcd_mode != LCD_MODE_VRAM) {
-                reg[REG_OBPD] = value;
+            if (cgb_mode && lcd_mode != LCD_MODE_VRAM) {
+                reg[reg_id] = value;
             }
+            else reg[reg_id] = 0xFF;
             break;
+
+        // Unused registers
         default:
-            reg[reg_id] = value;   // Convert to range 0-255
+            reg[reg_id] = 0xFF;
             break;
     }
 }
@@ -237,13 +275,24 @@ void ppu_tick()
 
     scanline_counter += clock;
     if (scanline_counter < lcd_mode_next) return;
-
+    
     // Switch lcd mode
+
+    // Pan Docs:
+    // The following are typical when the display is enabled:
+    //   Mode 2  2_____2_____2_____2_____2_____2___________________2____
+    //   Mode 3  _33____33____33____33____33____33__________________3___
+    //   Mode 0  ___000___000___000___000___000___000________________000
+    //   Mode 1  ____________________________________11111111111111_____
+
     switch (lcd_mode) {
         case LCD_MODE_OAM: // Searching OAM for OBJs whose Y coordinate overlap this line
+
+            object_count = search_oam(reg[REG_LY]);
+
             reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VRAM;
             lcd_mode = LCD_MODE_VRAM;
-            lcd_mode_next += 172;
+            lcd_mode_next += 168 + (object_count * 10);
 
             // TODO figure out stat irq blocking
             // This line fixes donkey kong for some reason
@@ -261,18 +310,19 @@ void ppu_tick()
 
             // request stat interrupt if enabled
             check_stat_irq(0);
+
+            // Draw scanline //////////////////////////////
+            if (lcd_enabled && vblank_counter % gb_frameskip == 0) {
+                draw_scanline(reg[REG_LY]);
+            }
+
             break;
 
         case LCD_MODE_HBLANK:
             scanline_counter -= SCANLINE_DOTS;
-            // Draw scanline //////////////////////////////
-            object_count = search_oam(reg[REG_LY]);
 
-            if (lcd_enabled && vblank_counter % gb_frameskip == 0) {
-                draw_scanline(reg[REG_LY]);
-            }
             // Move to a new scanline
-            reg[REG_LY] ++;
+            reg[REG_LY]++;
 
             check_lyc();
 
@@ -288,12 +338,13 @@ void ppu_tick()
                 lcd_mode = LCD_MODE_VBLANK;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VBLANK;
                 lcd_mode_next = SCANLINE_DOTS;
+                
+                // request stat interrupt if enabled
+                check_stat_irq(1);
 
                 // Vblank interrupt request
                 SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
 
-                // request stat interrupt if enabled
-                check_stat_irq(1);
             }
             else {
                 // change lcd mode to oam search (0~80)
@@ -315,7 +366,7 @@ void ppu_tick()
             check_stat_irq(0);
             
             // if reached last line
-            if (reg[REG_LY] >= 154) {
+            if (reg[REG_LY] == 154) {
                 // reset line
                 reg[REG_LY] = 0;
                 window_line = 0;
@@ -334,7 +385,7 @@ void ppu_tick()
                 if (!input_updated) {
                     input_joypad_update();
                 }
-                
+
                 // change lcd mode to oam search (0~80)
                 lcd_mode = LCD_MODE_OAM;
                 reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;

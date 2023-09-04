@@ -30,8 +30,8 @@ int     fps = 60;
 double  tick_rate; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "pokemon red";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
+const char* rom_file_name = "mooneye-test-suite/acceptance/interrupts/ie_push";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/tests/";
 
 /* 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -188,6 +188,10 @@ void application_update() {
                     // Toggle audio ON/OFF
                     case SDLK_m:
                         audio_toggle();
+                        break;
+                    // Write trace log ON/OFF
+                    case SDLK_BACKQUOTE:
+                        gb_debug_show_tracelog = (gb_debug_show_tracelog == 1) ? 0 : 1;
                         break;
                 }
                 break;

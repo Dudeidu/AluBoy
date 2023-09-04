@@ -90,7 +90,11 @@ void timer_write_register(u8 reg_id, u8 value)
             }
             timer_enabled = GET_BIT(value, 2);
 
-            reg[REG_TAC] = value;
+            reg[REG_TAC] = value | 0xF8; // only bits 0~2 are used
+            break;
+
+        default:
+            reg[reg_id] = 0xFF;
             break;
     }
 

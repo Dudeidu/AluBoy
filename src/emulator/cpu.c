@@ -64,9 +64,8 @@ u8  ei_flag;
 u8  interrupts_enabled; // IME flag
 
 // Tests
-
+u8  lcd_mode_block_enabled = 0;
 int counter = 1;
-u8  debug_show_tracelog = 0;
 int debug_tracelog_interval = 1;
 int debug_tracelog_start = 0;
 
@@ -308,7 +307,7 @@ void cpu_powerup()
         F.H = 1;
         F.C = 1;
     }
-
+    
     BC.full = 0x0013;
     DE.full = 0x00D8;
     HL.full = 0x014D;
@@ -318,10 +317,11 @@ void cpu_powerup()
     interrupts_enabled = 0;
     ei_flag = 0;
     halted = 0;
-
+    
     for (int i = 0; i <= 0xFF; i++) {
         reg[i] = 0xFF;
     }
+    
     reg[REG_P1] = 0xCF;
     reg[REG_SB] = 0x00;
     reg[REG_SC] = 0x7E;
@@ -329,7 +329,7 @@ void cpu_powerup()
     reg[REG_IF] = 0xE1;
 
     reg[REG_KEY1] = 0xFF;
-
+    
     reg[REG_VBK] = 0x0;
     reg[REG_HDMA1] = 0xFF;
     reg[REG_HDMA2] = 0xFF;
@@ -342,6 +342,7 @@ void cpu_powerup()
     reg[REG_SVBK] = 0x00;
 
     reg[REG_IE] = 0x00;
+    
 }
 int cpu_init()
 {
@@ -357,7 +358,8 @@ u8 cpu_read_register(u8 reg_id) {
             return reg[REG_P1];
         case REG_SB:
             return 0xFF;
-
+        case REG_SC:
+            return 0xFF; // TODO implement serial correctly
         default:
             return reg[reg_id];
     }
@@ -367,16 +369,35 @@ void cpu_write_register(u8 reg_id, u8 value) {
     switch (reg_id) {
         case REG_P1:
             // only change bits 4 and 5 (rest are read-only)
-            reg[REG_P1] = (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
+            reg[REG_P1] =   (reg[REG_P1] & ~0x30) | ((value >> 4) & 0x3) << 4;
+            break;
+        case REG_SB:
+            reg[reg_id] = value;
+            break;
+        case REG_SC:
+            if (cgb_mode)   reg[reg_id] = (reg[reg_id] & ~0x7E) | (value & 0x7E);
+            else            reg[reg_id] = (reg[reg_id] & ~0x7C) | (value & 0x7C);
             break;
         case REG_IF:
-            reg[REG_IF] = (reg[REG_IF] & 0xF0) | (value & 0x0F);
+            reg[REG_IF] =   (reg[reg_id] & 0xF0) | (value & 0x0F);
             break;
-        case 0x50: // BOOT register (read only)
+        case REG_KEY1:  
+            // (CGB) Prepare speed switch
+            if (cgb_mode)   reg[reg_id] = (reg[reg_id] & ~1) | (value & 1);
+            else            reg[reg_id] = 0xFF;
             break;
-
+        case REG_RP:    
+            // (CGB) Infra-red
+            if (cgb_mode)   reg[reg_id] = (reg[reg_id] & ~0x3C) | (value & 0x3C);
+            else            reg[reg_id] = 0xFF;
+            break;
+        case REG_SVBK: 
+            // (CGB) WRAM bank select 
+            if (cgb_mode)   reg[reg_id] = (reg[reg_id] & ~7) | (value & 7);
+            else            reg[reg_id] = 0xFF;
+        // Unused registers
         default:
-            reg[reg_id] = value;   // Convert to range 0-255
+            reg[reg_id] = 0xFF;   // Convert to range 0-255
             break;
     }
 }
@@ -387,7 +408,7 @@ u8 cpu_read_memory(u16 addr) {
         case 0x8:
         case 0x9:
             // VRAM
-            //if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
+            if (lcd_mode_block_enabled && lcd_mode == LCD_MODE_VRAM) return 0xFF;
 
             if (cgb_mode)   return vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)];
             else            return vram[addr & 0x1FFF];
@@ -404,13 +425,13 @@ u8 cpu_read_memory(u16 addr) {
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                //if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM) return 0xFF;
+                if (lcd_mode_block_enabled && (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)) return 0xFF;
 
                 return oam[addr - MEM_OAM]; // Convert to range 0-159
             }
             // Unusable area
             else if (addr >= MEM_UNUSABLE && addr < MEM_IO) {
-                if (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM)
+                if (lcd_mode_block_enabled && (lcd_mode == LCD_MODE_VRAM || lcd_mode == LCD_MODE_OAM))
                 {
                     // TODO OAM corruption
                     return 0xFF;
@@ -436,10 +457,10 @@ void cpu_write_memory(u16 addr, u8 value) {
         case 0x8:
         case 0x9:
             // VRAM
-            //if (lcd_mode != LCD_MODE_VRAM) {
+            if (!lcd_mode_block_enabled || lcd_mode != LCD_MODE_VRAM) {
                 if (cgb_mode)   vram[(addr & 0x1FFF) + (GET_BIT(reg[REG_VBK], 0) * BANKSIZE_VRAM)] = value;
                 else            vram[addr & 0x1FFF] = value;
-            //}
+            }
             //else {
             //    printf("attempting to write to VRAM on LCD_MODE_VRAM! LY=%d\n", reg[REG_LY]);
             //}
@@ -458,9 +479,9 @@ void cpu_write_memory(u16 addr, u8 value) {
             }
             // Object attribute memory (OAM)
             else if (addr >= MEM_OAM && addr < MEM_UNUSABLE) {
-                //if (lcd_mode != LCD_MODE_VRAM && lcd_mode != LCD_MODE_OAM) {
+                if (!lcd_mode_block_enabled || (lcd_mode != LCD_MODE_VRAM && lcd_mode != LCD_MODE_OAM)) {
                     oam[addr - MEM_OAM] = value; // Convert to range 0-159
-                //}
+                }
             }
             // High RAM
             else if (addr >= MEM_HRAM && addr < MEM_IE) {
@@ -480,15 +501,16 @@ u8 cpu_update() {
     u8 op; // the current operand read from memory at PC location
     u8 cycles;
 
-    if (debug_show_tracelog) {
+    if (gb_debug_show_tracelog) {
         if (counter >= debug_tracelog_start && counter % debug_tracelog_interval == 0)
         {
             printf("%06d [%04x] (%02X %02X %02X %02X)  AF=%04x BC=%04x DE=%04x HL=%04x SP=%04x P1=%04X LCD:%d IME:%d IE=%02X IF=%02X HALT=%d DIV=%02X TIMA=%02X\n",
                 counter, PC, read(PC), read(PC + 1), read(PC + 2), read(PC + 3), (A << 8) | ((F.Z << 7) | (F.N << 6) | (F.H << 5) | (F.C << 4)),
                 BC.full, DE.full, HL.full, SP.full, reg[REG_P1], lcd_enabled, interrupts_enabled, reg[REG_IE], reg[REG_IF], halted, reg[REG_DIV], reg[REG_TIMA]);
         }
-        counter++;
+        
     }
+    counter++;
 
     if (halted) op = 0x00; // NOOP
     else op = read(PC++);
@@ -517,41 +539,62 @@ u8 do_interrupts() {
 
     if (halted) {
         halted = 0; // The CPU wakes up
-        //printf("CPU woke up\n");
     }
-    //printf("%d", reg[REG_IE]);
+
     // The interrupt handler is called normally
     if (interrupts_enabled) {
-        // Interrupt priority
+        u16 pc_old = PC;
+        u8 ie_prev = reg[REG_IE];
+
+        // Internal ticks
+        tick();
+        tick();
+
+        // Push higher byte of PC to stack
+        //printf("high: %04X, value: %04X\n", ((SP.full - 1) & 0xFFFF), (PC >> 8) & 0xFF);
+        write(--SP.full, (PC >> 8) & 0xFF);
+
+        // If the IE register was overwritten by the high byte push, PC will jump to 0x0000
+        if (SP.full == MEM_IE) {
+            PC = 0;
+        }
+
+        // CALL interrupt vector
         for (u8 i = 0; i <= 4; i++) {
             if (GET_BIT(reg[REG_IF], i) && GET_BIT(reg[REG_IE], i)) {
-                RESET_BIT(reg[REG_IF], i);
-                interrupts_enabled = 0;
-                if (i == 4) {
-                    u8 i = 0;
-                }
-                // CALL interrupt vector
-                // push PC onto stack, then jump to address
-                tick();
-                tick();
-                write(--SP.full, (PC >> 8) & 0xFF);
-                write(--SP.full, (PC & 0xFF));
+                // Interrupt priority
                 switch (i) {
-                    case 0: 
-                        PC = INT_VEC_VBLANK; break; //printf("vb\n"); break;
-                    case 1: 
-                        PC = INT_VEC_STAT; 
-                        //check_stat_irq(0);
-                        break; //printf("st\n");break;
-                    case 2: PC = INT_VEC_TIMER;  break; //printf("tm\n");break;
-                    case 3: PC = INT_VEC_SERIAL; break; //printf("sr\n");break;
-                    case 4: PC = INT_VEC_JOYPAD; break; //printf("jp\n");break;
+                    case 0: PC = INT_VEC_VBLANK;    if (gb_debug_show_tracelog) printf("vb\n"); break;
+                    case 1: PC = INT_VEC_STAT;      if (gb_debug_show_tracelog) printf("st\n"); break;
+                    case 2: PC = INT_VEC_TIMER;     if (gb_debug_show_tracelog) printf("tm\n"); break;
+                    case 3: PC = INT_VEC_SERIAL;    if (gb_debug_show_tracelog) printf("sr\n"); break;
+                    case 4: PC = INT_VEC_JOYPAD;    if (gb_debug_show_tracelog) printf("jp\n"); break;
                 }
-                tick();
-                cycles = 20;
-                break;
             }
         }
+
+        // Push lower byte of PC to stack
+        //printf("low: %04X, value: %04X\n", ((SP.full - 1) & 0xFFFF), (pc_old & 0xFF));
+        ie_prev = reg[REG_IE];
+
+        write(--SP.full, (pc_old & 0xFF));
+        
+        // Reset the IF register bits that were handled
+        for (u8 i = 0; i <= 4; i++) {
+            if (    (SP.full == MEM_IE          && GET_BIT(ie_prev, i)      ) 
+                ||  (GET_BIT(reg[REG_IF], i)    && GET_BIT(reg[REG_IE], i)) ) {
+                RESET_BIT(reg[REG_IF], i);
+            }
+        }
+
+        // Internal tick
+        tick();
+
+        // In total the interrupt handler takes 20 cycles
+        cycles = 20;
+
+        interrupts_enabled = 0;
+
     }
     // TODO - halt bug
     else {

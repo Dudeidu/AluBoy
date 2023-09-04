@@ -239,7 +239,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             ch1_sweep.negative_flag = GET_BIT(value, 3);
             ch1_sweep.shift         = value & 0x7;
 
-            reg[reg_id] = value;
+            reg[reg_id] = value | 0x80;
 
             break;
         case REG_NR11:
@@ -387,7 +387,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             ch3.dac_enabled = GET_BIT(value, 7);
             if (!ch3.dac_enabled) ch3.enabled = 0;
 
-            reg[reg_id] = value;
+            reg[reg_id] = value | 0x7F;
             break;
         case REG_NR31:
             ch3.len_timer = value;
@@ -402,7 +402,7 @@ int apu_write_register(u8 reg_id, u8 value) {
             %11	25% volume (shift samples read from Wave RAM right twice)
             */
             ch3_wave.volume = (value >> 5) & 3;
-            reg[reg_id] = value;
+            reg[reg_id] = value | 0x9F;
             break;
         case REG_NR33:
             // This registers stores the lower 8 bits of channel’s 11-bit “period value”
@@ -436,11 +436,12 @@ int apu_write_register(u8 reg_id, u8 value) {
             }
             reg[reg_id] = value;
             break;
+
         // Noise channel
         case REG_NR41:
-            ch4.len_timer = value;
+            ch4.len_timer = value & 0x3F;
 
-            reg[reg_id] = value;
+            reg[reg_id] = value | 0xC0;
             break;
 
         case REG_NR42:
@@ -504,7 +505,7 @@ int apu_write_register(u8 reg_id, u8 value) {
                 if (!ch4.dac_enabled)
                     ch4.enabled = 0;
             }
-            reg[reg_id] = value;
+            reg[reg_id] = value | 0xC0;
             break;
 
         // Global sound registers
@@ -558,9 +559,17 @@ int apu_write_register(u8 reg_id, u8 value) {
                 //apu_powerup();
             }
             break;
-
-        default:
+        // Wave RAM
+        case REG_WAVERAM:
+        case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36:
+        case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C:
+        case 0x3D: case 0x3E: case 0x3F:
             reg[reg_id] = value;
+            break;
+
+        // Unused
+        default:
+            reg[reg_id] = 0xFF;
             break;
     }
     return 0;
