@@ -22,8 +22,20 @@ typedef struct {
     u8 priority;
 } ObjectPriority;
 
-u8* lcd_buffer;
+RGBColor colors_monochrome[4] = {
+    {245, 250, 239},   // white (greenish)
+    {134, 194, 112},   // light
+    {47, 105, 87},     // dark
+    {0, 0, 0},         // black
+};
+
+// Color and Palette data
+RGBColor *lcd_pixels;   // final result to be displayed onto the screen
+u8* lcd_buffer; 
 u8* lcd_index_buffer;   // internal buffer that keeps the color index (instead of the palette index)
+u8  pal_bgp[4]      = { 0, 1, 2, 3 };
+u8  pal_obp0[4]     = { 0, 1, 2, 3 };
+u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 
 u8 redraw_flag;         // when true screen will be redrawn at the end of the frame
 
@@ -33,17 +45,14 @@ u16 scanline_counter;   // every >SCANLINE_DOTS, update LY
 u8  window_line;        // window LY
 u16 lcd_mode_next;      // determines after what cycle (scanline_counter) to switch lcd_mode
 
+u8 sx_start;            // the value of SCX register that was read at the start of the scanline
+
 ObjectPriority objects[40]; // array of object indexes that intersect with of the current scanline
 u8  object_count;       // how many objects to read from the array
 
 // Drawing optimization
 int vblank_counter  = 0;
 u16 tm_addr_prev    = 0;
-
-// Palette data
-u8  pal_bgp[4]      = { 0, 1, 2, 3 };
-u8  pal_obp0[4]     = { 0, 1, 2, 3 };
-u8  pal_obp1[4]     = { 0, 1, 2, 3 };
 
 
 // Debugging
@@ -59,6 +68,9 @@ void check_stat_irq(u8);
 void update_palette(u8, u8);
 void disable_lcd();
 void enable_lcd();
+u16  calculate_mode3_duration();
+inline void switch_lcd_mode(enum LCDMode);
+inline u8 compare_rgb_colors(RGBColor, RGBColor);
 
 // PUBLIC --------------------------------------------------
 
@@ -67,20 +79,21 @@ int ppu_init()
 {
     // Allocate memory for the buffer and initialize with 0
     int buffer_size = (SCREEN_WIDTH * SCREEN_HEIGHT) / PIXELS_PER_BYTE;
-    
-    lcd_buffer = NULL;
-    lcd_buffer = (u8*)calloc(buffer_size, sizeof(u8));
-    if (lcd_buffer == NULL)
-    {
-        fprintf(stderr, "Failed to allocate memory for the LCD buffer!\n");
-        return 0;
-    }
 
     lcd_index_buffer = NULL;
     lcd_index_buffer = (u8*)calloc(buffer_size, sizeof(u8));
     if (lcd_index_buffer == NULL)
     {
         fprintf(stderr, "Failed to allocate memory for the LCD index buffer!\n");
+        return 0;
+    }
+
+    lcd_pixels = NULL;
+    // Allocate memory for the array
+    lcd_pixels = (RGBColor *)calloc(buffer_size, sizeof(RGBColor));
+    if (lcd_pixels == NULL)
+    {
+        fprintf(stderr, "Failed to allocate memory for the LCD pixels buffer!\n");
         return 0;
     }
 
@@ -122,9 +135,8 @@ void ppu_powerup()
 }
 
 // Used for passing the pixel buffer to GL
-u8* ppu_get_pixel_buffer()
-{
-    return lcd_buffer;
+RGBColor* ppu_get_pixel_buffer() {
+    return lcd_pixels;
 }
 
 // Whether the screen needs to be redrawn
@@ -220,7 +232,7 @@ void ppu_write_register(u8 reg_id, u8 value) {
             reg[reg_id] = value;
             break;
         case REG_VBK:
-            if (cgb_mode)   reg[reg_id] = value;
+            if (cgb_mode)   reg[reg_id] = (value & 1) | (~1); // only bit 0 matters
             else            reg[reg_id] = 0xFF;
             break;
         case REG_HDMA1:
@@ -255,8 +267,11 @@ void ppu_write_register(u8 reg_id, u8 value) {
 
 
 void oam_dma_transfer_tick() {
+    u8 t_u8;
+    u16 addr = ((reg[REG_DMA] << 8) | oam_dma_index) & 0xFFFF;
+
     oam_dma_access_flag = 1;
-    u8 t_u8 = read((reg[REG_DMA] << 8) | oam_dma_index);
+    t_u8 = read(addr);
     oam_dma_access_flag = 0;
 
     oam[oam_dma_index] = t_u8;
@@ -276,6 +291,7 @@ void ppu_tick()
     scanline_counter += clock;
     if (scanline_counter < lcd_mode_next) return;
     
+    //printf("%d\n", lcd_mode);
     // Switch lcd mode
 
     // Pan Docs:
@@ -287,23 +303,20 @@ void ppu_tick()
 
     switch (lcd_mode) {
         case LCD_MODE_OAM: // Searching OAM for OBJs whose Y coordinate overlap this line
-
             object_count = search_oam(reg[REG_LY]);
 
-            reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VRAM;
-            lcd_mode = LCD_MODE_VRAM;
-            lcd_mode_next += 168 + (object_count * 10);
+            switch_lcd_mode(LCD_MODE_VRAM);
+            lcd_mode_next += calculate_mode3_duration();
 
             // TODO figure out stat irq blocking
-            // This line fixes donkey kong for some reason
+            // Dirty fix that mostly works for some reason
             stat_irq_flag = 0;
 
             vram_accessible = 1;
             break;
 
         case LCD_MODE_VRAM: // Reading OAM and VRAM to generate the picture
-            reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
-            lcd_mode = LCD_MODE_HBLANK;
+            switch_lcd_mode(LCD_MODE_HBLANK);
             lcd_mode_next = SCANLINE_DOTS;
 
             vram_accessible = 0;
@@ -325,6 +338,7 @@ void ppu_tick()
             reg[REG_LY]++;
 
             check_lyc();
+            check_stat_irq(0);
 
             // Update inputs at a different LY each frame to avoid detection
             if (!input_updated) {
@@ -335,21 +349,18 @@ void ppu_tick()
                 // Vblank period start
                 vblank_counter++;
 
-                lcd_mode = LCD_MODE_VBLANK;
-                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_VBLANK;
+                switch_lcd_mode(LCD_MODE_VBLANK);
                 lcd_mode_next = SCANLINE_DOTS;
                 
                 // request stat interrupt if enabled
                 check_stat_irq(1);
-
                 // Vblank interrupt request
                 SET_BIT(reg[REG_IF], INT_BIT_VBLANK);
 
             }
             else {
                 // change lcd mode to oam search (0~80)
-                lcd_mode = LCD_MODE_OAM;
-                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
+                switch_lcd_mode(LCD_MODE_OAM);
                 lcd_mode_next = 80;
 
                 // request stat interrupt if enabled
@@ -371,6 +382,10 @@ void ppu_tick()
                 reg[REG_LY] = 0;
                 window_line = 0;
 
+                // request interrupt if enabled
+                check_lyc();
+                check_stat_irq(0);
+                
                 // obscure behavior
                 if (cgb_mode && !double_speed) {
                     vram_accessible = 0;
@@ -387,22 +402,18 @@ void ppu_tick()
                 }
 
                 // change lcd mode to oam search (0~80)
-                lcd_mode = LCD_MODE_OAM;
-                reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_OAM;
+                switch_lcd_mode(LCD_MODE_OAM);
                 lcd_mode_next = 80;
-
-                // request interrupt if enabled
-                check_lyc();
                 check_stat_irq(0);
             }
             break;
     }
+    
 }
 
-void ppu_cleanup()
-{
-    if (lcd_buffer) free(lcd_buffer);
-    if (lcd_index_buffer) free(lcd_index_buffer);
+void ppu_cleanup() {
+    if (lcd_index_buffer)   free(lcd_index_buffer);
+    if (lcd_pixels)         free(lcd_pixels);
 }
 
 
@@ -443,16 +454,12 @@ void disable_lcd() {
     vblank_counter = 0;
     scanline_counter = 0;
 
-    reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | LCD_MODE_HBLANK;
-    lcd_mode = LCD_MODE_HBLANK;
+    switch_lcd_mode(LCD_MODE_HBLANK);
     lcd_mode_next = SCANLINE_DOTS;
-
-    // request hblank interrupt if enabled
-    check_stat_irq(0);
     
     vram_accessible = 0;
 
-    memset(lcd_buffer, 0, buffer_size);
+    //memset(lcd_pixels, 255, buffer_size * sizeof(RGBColor));
     memset(lcd_index_buffer, 0, buffer_size);
 }
 void enable_lcd() {
@@ -460,6 +467,48 @@ void enable_lcd() {
     vram_accessible = 1;
     check_lyc();
     check_stat_irq(0);
+}
+
+u16 calculate_mode3_duration() {
+    u16 dur = 0;
+    u8 wx = reg[REG_WX];
+    u8 sx = reg[REG_SCX];
+
+    
+    if (wx == 166 || wx == 0xFF || !GET_BIT(reg[REG_LCDC], LCDC_W_ENABLE)) {
+        // Total cycles: (173.5 + (xscroll % 7))
+        dur += 6;                   // (6 cycles) fetch background tile nametable+bitplanes
+        dur += 168 + (sx % 7);      // (167.5 + (xscroll % 7) cycles) fetch another tile and sprite window.                        
+    }
+    else if ( (wx > 0) && (wx < 166) ) {
+        // Total cycles: (173.5 + 6 + (xscroll % 7))
+        dur += 6;                   // (6 cycles) fetch background tile nametable+bitplanes
+        dur += (sx % 7) + wx + 1;   // (1 to 172 cycles) ((xscroll % 7) + xwindow + 1)
+        dur += 6;                   // (6 cycles) fetch window tile nametable+bitplanes
+        dur += (167 - wx);          // (1.5 to 166.5 cycles)  (166.5 - xwindow)                       
+    }
+    else if (wx == 0) {
+        if (sx % 7 == 7) {
+            // Total cycles: 187.5
+            dur += 7;                   // (7 cycles) technically the last B is part of the B01s pattern.
+            dur += 6;                   // (6 cycles) fetch window tile nametable+bitplanes
+            dur += 168 + 7;             // (174.5 cycles)
+        }
+        else {
+            // Total cycles: 180.5 to 186.5
+            dur += 7;                   // (7 cycles) technically the last B is part of the B01s pattern.
+            dur += 6;                   // (6 cycles) fetch window tile nametable+bitplanes
+            dur += 168 + (sx % 7);      // (167.5 to 173.5 cycles) (167.5 + (scroll % 7))                 
+        }
+    }
+    // TODO better simulation of the duration that sprites add
+    dur += (object_count * 10);
+
+    return dur;
+}
+
+inline u8 compare_rgb_colors(RGBColor color1, RGBColor color2) {
+    return color1.red == color2.red && color1.green == color2.green && color1.blue == color2.blue;
 }
 
 // Custom comparison function for sorting objects
@@ -500,8 +549,7 @@ void check_lyc() {
     else RESET_BIT(reg[REG_STAT], 2);
 }
 
-// Searching OAM for OBJs whose Y coordinate overlap this scanline and stores them an a sorted array.
-// returns the object amount
+// Searching OAM for OBJs whose Y coordinate overlap this scanline and stores them an a sorted array. returns the object amount
 u8 search_oam(u8 y) {
     u8 count = 0;
     u8 obj_height = GET_BIT(reg[REG_LCDC], LCDC_OBJ_SZ) ? 16 : 8; // 8x16 sprites
@@ -534,6 +582,11 @@ u8 search_oam(u8 y) {
     return count;
 }
 
+inline void switch_lcd_mode(enum LCDMode mode) {
+    reg[REG_STAT] = (reg[REG_STAT] & ~0x3) | mode;
+    lcd_mode = mode;
+}
+
 void draw_scanline(u8 y) {
     if (debug_show_line_data) printf("line:%03d bg?:%d obj?:%d ", y, GET_BIT( reg[REG_LCDC], LCDC_BGW_ENABLE), GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE));
     
@@ -555,10 +608,10 @@ void draw_tiles(u8 y) {
     
     u16 y_screen_width = y * SCREEN_WIDTH;
     
-    u8  sx      = reg[REG_SCX];
-    u8  sy      = reg[REG_SCY];
-    u8  wx      = reg[REG_WX];
-    u8  wy      = reg[REG_WY];
+    u8  sx  = reg[REG_SCX];
+    u8  sy  = reg[REG_SCY];
+    u8  wx  = reg[REG_WX];
+    u8  wy  = reg[REG_WY];
 
     u8  td_area_flag    = GET_BIT(reg[REG_LCDC], LCDC_BGW_TILEDATA_AREA);
     u16 vram_offset     = MEM_VRAM;
@@ -656,14 +709,24 @@ void draw_tiles(u8 y) {
 
         // Update pixel color
         pixel_pos = x + y_screen_width;
-        if (lcd_buffer[pixel_pos] != pal_bgp[color_index]) {
-            lcd_buffer[pixel_pos] = pal_bgp[color_index];
-            lcd_index_buffer[pixel_pos] = color_index;
+        if (!cgb_mode) {
+            RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
+            RGBColor* col_new   = &colors_monochrome[pal_bgp[color_index]];
+            if (!compare_rgb_colors(*col_lcd, *col_new)) {
+                col_lcd->red    = col_new->red;
+                col_lcd->green  = col_new->green;
+                col_lcd->blue   = col_new->blue;
 
-            // Tell screen to redraw at the next step
-            if (!redraw_flag) redraw_flag = 1;
+                lcd_index_buffer[pixel_pos] = color_index;
 
-            //pixels_updates++;
+                // Tell screen to redraw at the next step
+                if (!redraw_flag) redraw_flag = 1;
+
+                //pixels_updates++;
+            }
+        }
+        else {
+
         }
         
         /*
@@ -738,12 +801,22 @@ void draw_objects(u8 y) {
             // BG and Window colors 1-3 over the OBJ
             if (bg_over_obj && lcd_index_buffer[pixel_pos] != 0) continue;
 
-            if (lcd_buffer[pixel_pos] != palette[color_index]) {
-                lcd_buffer[pixel_pos] = palette[color_index];
-                lcd_index_buffer[pixel_pos] = color_index;
+            if (!cgb_mode) {
+                RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
+                RGBColor* col_new   = &colors_monochrome[palette[color_index]];
+                if (!compare_rgb_colors(*col_lcd, *col_new)) {
+                    col_lcd->red    = col_new->red;
+                    col_lcd->green  = col_new->green;
+                    col_lcd->blue   = col_new->blue;
 
-                // Tell screen to redraw at the next step
-                if (!redraw_flag) redraw_flag = 1;
+                    lcd_index_buffer[pixel_pos] = color_index;
+
+                    // Tell screen to redraw at the next step
+                    if (!redraw_flag) redraw_flag = 1;
+                }
+            }
+            else {
+
             }
         }
 

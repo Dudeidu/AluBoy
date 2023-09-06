@@ -30,8 +30,8 @@ int     fps = 60;
 double  tick_rate; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "mooneye-test-suite/acceptance/interrupts/ie_push";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/tests/";
+const char* rom_file_name = "legend of zelda";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
 
 /* 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -240,7 +240,7 @@ void application_update() {
 
 void application_draw() {
     // Converts the emulator's screen buffer into RGBA format
-    graphics_update_rgba_buffer(gb_get_screen_buffer());
+    graphics_update_rgba_buffer(gb_get_screen_buffer(), SCREEN_WIDTH * SCREEN_HEIGHT);
     // Display the buffer's contents on the SDL screen
     graphics_draw(window);
 }

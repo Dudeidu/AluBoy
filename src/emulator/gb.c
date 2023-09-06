@@ -1,6 +1,7 @@
 #include "gb.h"
 #include "macros.h"
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,11 +110,9 @@ void tick() {
         //printf("clock prev: %02X, clock new: %02X\n", (clock_prev >> 8) & 0xFF, reg[REG_DIV]);
     }
     apu_tick();
-    
-    //if (stat_bug) stat_bug = 0;
 }
 
-u8* gb_get_screen_buffer() {
+RGBColor* gb_get_screen_buffer() {
     return ppu_get_pixel_buffer();
 }
 

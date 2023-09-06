@@ -4,6 +4,7 @@
 #define GB_H
 
 #include "alu_binary.h"
+#include "colors.h"
 
 u8  cgb_mode;
 u8  gb_frameskip; // only draw the screen when vblank_counter % gb_frameskip == 0
@@ -21,7 +22,7 @@ int gb_update(u8* inputs);
 void tick();
 
 // Fetch a pointer to the PPU's screen buffer
-u8* gb_get_screen_buffer();
+RGBColor* gb_get_screen_buffer();
 
 void gb_output_audio_sample(u8 output);
 

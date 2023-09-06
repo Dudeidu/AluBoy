@@ -4,6 +4,7 @@
 #define PPU_H
 
 #include "alu_binary.h"
+#include "colors.h"
 
 u8  oam_dma_transfer_flag;  // whether a dma transfer is currently running
 u8  oam_dma_access_flag;    // allows bypassing the DMA memory blocking when its the DMA itself doing accessing the memory
@@ -19,7 +20,7 @@ u8  lcd_mode;               // vblank/hblank/oam search/pixel rendering...
 int ppu_init();
 void ppu_powerup();
 
-u8* ppu_get_pixel_buffer();
+RGBColor* ppu_get_pixel_buffer();
 
 u8 ppu_get_redraw_flag();
 void ppu_set_redraw_flag(u8 val);

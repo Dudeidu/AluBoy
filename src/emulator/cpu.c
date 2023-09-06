@@ -2318,11 +2318,12 @@ u8 execute_instruction(u8 op) {
             }
             break;
         case 0xD9: // RETI
+            ei_flag = 1;
+
             t_u16.low = read(SP.full++); tick();
             t_u16.high = read(SP.full++); tick();
             PC = t_u16.full;
             tick();
-            interrupts_enabled = 1;
             break;
         case 0xDA: // JP C,a16
             t_u16.low = read(PC++); tick();

@@ -45,14 +45,6 @@ const GLint indicies[] = {
     0, 1, 2, 0, 2, 3
 };
 
-const SDL_Color palette[] = {
-    {245, 250, 239, 255},   // white (greenish)
-    {134, 194, 112, 255},   // light
-    {47, 105, 87, 255},     // dark
-    {0, 0, 0, 255},         // black
-
-    // ... add more colors to your palette
-};
 
 uint8_t* rgba_buffer = NULL;
 
@@ -237,32 +229,20 @@ int8_t* graphics_get_pixel_buffer()
 }
 */
 
-void graphics_update_rgba_buffer(u8* color_index_buffer)
+void graphics_update_rgba_buffer(RGBColor* color_buffer, int arr_len)
 {
     // Iterate through a buffer of color_index and update the rgba buffer
     // with the corresponding colors from the palette
-    int16_t     buffer_size = SCREEN_WIDTH * SCREEN_HEIGHT;
-    SDL_Color   color;
     int         pos;
 
-    for (int i = 0; i < buffer_size; i++) {
+    for (int i = 0; i < arr_len; i += 1) {
         pos = i * 4;
-        color = palette[color_index_buffer[i]];
 
-        rgba_buffer[pos]     = color.r;
-        rgba_buffer[pos + 1] = color.g;
-        rgba_buffer[pos + 2] = color.b;
-        rgba_buffer[pos + 3] = color.a;
+        rgba_buffer[pos]     = color_buffer[i].red;
+        rgba_buffer[pos + 1] = color_buffer[i].green;
+        rgba_buffer[pos + 2] = color_buffer[i].blue;
+        rgba_buffer[pos + 3] = 255;
     }
-
-    /*
-    // print out the buffer contents
-    buffer_size = 160 * 144 * 4;
-    char* str;
-    for (int i = 0; i < buffer_size; i++) {
-        printf("%d ", rgba_buffer[i]);
-    }
-    */
 
     // Update the texture with the new color data
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, rgba_buffer);

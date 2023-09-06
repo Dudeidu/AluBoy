@@ -156,6 +156,7 @@
     <ClInclude Include="src\emulator\mmu.h" />
     <ClInclude Include="src\emulator\ppu.h" />
     <ClInclude Include="src\framework\graphics.h" />
+    <ClInclude Include="src\utils\colors.h" />
     <ClInclude Include="src\utils\macros.h" />
     <ClInclude Include="src\emulator\timer.h" />
   </ItemGroup>
