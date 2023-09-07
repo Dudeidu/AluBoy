@@ -7,6 +7,7 @@
 
 u8 checksum_header;
 u8 has_battery;
+u8 palette_hash_id; // This is used by the PPU to get a compatibility color palette for some DMG roms
 
 
 int mmu_init(u8* rom_buffer);

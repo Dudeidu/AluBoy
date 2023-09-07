@@ -46,6 +46,7 @@ int gb_init(u8* rom_buffer) {
 
     gb_frameskip = 1;
     gb_debug_show_tracelog = 0;
+    gb_cgb_compability_palette_flag = 1;
 
     return 1;
 }

@@ -13,6 +13,8 @@
 #include "ppu.h"
 #include "apu.h"
 
+
+
 u8* rom  = NULL;    // loaded from .gb / .gbc
 u8* eram = NULL;    // external ram (cartridge)
 
@@ -46,6 +48,9 @@ u8  rom_version;
 u16 checksum_global;
 u8  rom_size_code;
 u8  eram_size_code;
+
+// Forward declaration
+u8 get_compability_palette_id(u8 lc_old, u8* lc_new, u8* title);
 
 
 int mmu_init(u8* rom_buffer) {
@@ -159,6 +164,13 @@ int mmu_init(u8* rom_buffer) {
     checksum_header     = rom[ROM_HEADER_CHECKSUM];
     checksum_global     = rom[ROM_GLOBAL_CHECKSUM] << 8 || rom[ROM_GLOBAL_CHECKSUM + 1];
 
+    
+    if (gb_cgb_compability_palette_flag)
+        palette_hash_id = get_compability_palette_id(licensee_code_old, licensee_code_new, title);
+    else
+        palette_hash_id = 0;
+    
+
     printf("Cart type: %d\nMBC: %d\nROM banks: %d\nERAM banks: %d\n\n", cart_type, mbc, rom_banks, eram_banks);
 
     return 1;
@@ -191,6 +203,56 @@ void mmu_powerup()
     }
 }
 
+u8 get_compability_palette_id(u8 lc_old, u8* lc_new, u8* title) {
+    u8 palette_id           = 0x00;
+    u8 title_checksum       = 0;
+    u8 title_checksum_index = 0;
+    u8 lut_size             = 0;
+
+    // Check if the old licensee code is $33.
+    if (lc_old == 0x33) {
+        // If yes, the new licensee code must be used. Check that it equals the ASCII string "01".
+        if (lc_new[0] != '0' || lc_new[1] != '1') {
+            // algorithm quits
+            return 0;
+        }
+    }
+    else if (lc_old != 0x01) {
+        // algorithm quits
+        return 0;
+    }
+
+    // Compute the sum of all 16 game title bytes, storing this as the “title checksum”.
+    for (u8 i = 0; i < 16; i++) {
+        title_checksum += title[i];
+    }
+
+    return title_checksum;
+    /*
+    // Find the title checksum in a table, and record its index within the table.
+    lut_size = sizeof(title_checksum_lut) / sizeof(title_checksum_lut[0]);
+    for (int i = 0; i < lut_size; i++) {
+        if (title_checksum != title_checksum_lut[i]) continue;
+
+        title_checksum_index = i;
+        break;
+    }
+    // If not found, palette ID 0 is used
+    if (title_checksum_index == 0) return 0;
+
+    // If the index is 64 or below, the index is used as-is as the palettes ID, and the algorithm ends.
+    if (title_checksum_index <= 0x40) return title_checksum_index;
+
+    // Otherwise, it must be further corrected based on the title’s fourth letter
+    for (int i = 0; i < 3; i++) {
+        if (title[3] == title_fourth_letter_lut[title_checksum_index - 0x40][i]) {
+            title_checksum_index += (i * 14);
+            return title_checksum_index;
+        }
+    }
+    return 0;
+    */
+}
 
 // Dump ERAM to [.sav] file
 void save() {

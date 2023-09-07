@@ -7,6 +7,7 @@
 
 
 #include "emu_shared.h"
+#include "cgb_palettes.h"
 
 #include "gb.h"
 #include "mmu.h"
@@ -22,20 +23,46 @@ typedef struct {
     u8 priority;
 } ObjectPriority;
 
-RGBColor colors_monochrome[4] = {
+RGBColor pal_monochrome[4] = {
     {245, 250, 239},   // white (greenish)
     {134, 194, 112},   // light
     {47, 105, 87},     // dark
     {0, 0, 0},         // black
 };
+RGBColor pal_bgp[4] = {
+    {245, 250, 239},   // white (greenish)
+    {134, 194, 112},   // light
+    {47, 105, 87},     // dark
+    {0, 0, 0},         // black
+};
+RGBColor pal_obp0[4] = {
+    {245, 250, 239},   // white (greenish)
+    {134, 194, 112},   // light
+    {47, 105, 87},     // dark
+    {0, 0, 0},         // black
+};
+RGBColor pal_obp1[4] = {
+    {245, 250, 239},   // white (greenish)
+    {134, 194, 112},   // light
+    {47, 105, 87},     // dark
+    {0, 0, 0},         // black
+};
+RGBColor pal_cgb[16][4]; // palettes 0-8 for BG, 9-15 for OBJ
+u8 cram[128];           // (cgb) color/palette RAM
 
 // Color and Palette data
 RGBColor *lcd_pixels;   // final result to be displayed onto the screen
 u8* lcd_buffer; 
 u8* lcd_index_buffer;   // internal buffer that keeps the color index (instead of the palette index)
-u8  pal_bgp[4]      = { 0, 1, 2, 3 };
-u8  pal_obp0[4]     = { 0, 1, 2, 3 };
-u8  pal_obp1[4]     = { 0, 1, 2, 3 };
+u8  pal_bgp_index[4]      = { 0, 1, 2, 3 };
+u8  pal_obp0_index[4]     = { 0, 1, 2, 3 };
+u8  pal_obp1_index[4]     = { 0, 1, 2, 3 };
+
+u8  cgb_bg_pal_inc_flag;// whether to increment the palette index after writing to BGPD
+u8  cgb_bg_pal_addr;    // copy of palette index (bits 0-5 of BGPI)
+
+u8  cgb_obj_pal_inc_flag; // whether to increment the palette index after writing to OBPD
+u8  cgb_obj_pal_addr;     // copy of palette index (bits 0-5 of OBPI)
 
 u8 redraw_flag;         // when true screen will be redrawn at the end of the frame
 
@@ -71,6 +98,7 @@ void enable_lcd();
 u16  calculate_mode3_duration();
 inline void switch_lcd_mode(enum LCDMode);
 inline u8 compare_rgb_colors(RGBColor, RGBColor);
+void update_compatibility_palettes(u8 hash, RGBColor* bgp, RGBColor* obp0, RGBColor* obp1);
 
 // PUBLIC --------------------------------------------------
 
@@ -132,6 +160,19 @@ void ppu_powerup()
     reg[REG_OBPI] = 0xFF;
     reg[REG_OBPD] = 0xFF;
 
+    // (cgb) Initialize the colors in the array
+    memset(cram, 0, sizeof(cram));
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 4; j++) {
+            pal_cgb[i][j].red   = 255;
+            pal_cgb[i][j].green = 255;
+            pal_cgb[i][j].blue  = 255;
+        }
+    }
+
+    if (gb_cgb_compability_palette_flag) {
+        update_compatibility_palettes(palette_hash_id, pal_bgp, pal_obp0, pal_obp1);
+    }
 }
 
 // Used for passing the pixel buffer to GL
@@ -152,9 +193,10 @@ void ppu_set_redraw_flag(u8 val) {
 u8 ppu_read_register(u8 reg_id) {
     // handles special cases
     switch (reg_id) {
+        case REG_BGPD:
         case REG_OBPD:
             if (lcd_mode == LCD_MODE_VRAM) return 0xFF;
-            return reg[REG_OBPD];
+            return reg[reg_id];
 
         default:
             return reg[reg_id];
@@ -244,19 +286,95 @@ void ppu_write_register(u8 reg_id, u8 value) {
             else            reg[reg_id] = 0xFF;
             break;
         case REG_BGPI:
+            if (cgb_mode) {
+                reg[reg_id]         = value | 0x40;         // bit 6 is unused
+                cgb_bg_pal_inc_flag = GET_BIT(value, 7);    // bit 7
+                cgb_bg_pal_addr     = value & 0x3F;         // bits 0-5
+            }
+            else reg[reg_id] = 0xFF;
+            break;
         case REG_BGPD:
+            /*
+            Bit 0-4   Red Intensity   ($00-1F)
+            Bit 5-9   Green Intensity ($00-1F)
+            Bit 10-14 Blue Intensity  ($00-1F)
+            */
+            if (cgb_mode) {
+                // Get the corresponding palette
+                u8 palette_index    = cgb_bg_pal_addr >> 3; // 2 bytes/color * 4 colors/palette
+                u8 color_index      = ((palette_index << 3) - cgb_bg_pal_addr) / 2; // the color index (out of 4) in this palette
+                u8 color_byte       = cgb_bg_pal_addr % 2;  // 0 = 5 red + 3 lower bits of green, 1 = 2 high bits of green + 5 blue + 1 unused bit
+                RGBColor* pal       = &pal_cgb[palette_index][color_index];
+
+                if (lcd_mode != LCD_MODE_VRAM) {
+                    cram[cgb_bg_pal_addr] = value;
+                    if (color_byte == 0) {
+                        pal->red = (value >> 3) & 0x1F;                         // bit 0-4   red intensity
+                        pal->green = (pal->green & (~7)) | (value & 7);         // bit 5-7   lower 3 bits of green
+                    }
+                    else {
+                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   higher 2 bits of green
+                        pal->blue = (value >> 2) & 0x1F;                        // Bit 10-14 (2-6)   blue intensity
+                    }
+                }
+
+                // Auto increment on write
+                if (cgb_bg_pal_inc_flag) {
+                    cgb_bg_pal_addr = (cgb_bg_pal_addr + 1) & 0x3F;     // wrap around when above 64
+                    reg[REG_BGPI]   = (reg[REG_BGPI] & 0xC0) | cgb_bg_pal_addr;
+                }
+                reg[reg_id] = value;
+            }
+            else reg[reg_id] = 0xFF;
+            break;
         case REG_OBPI:
+            if (cgb_mode) {
+                reg[reg_id]          = value | 0x40;        // bit 6 is unused
+                cgb_obj_pal_inc_flag = GET_BIT(value, 7);   // bit 7
+                cgb_obj_pal_addr     = value & 0x3F;        // bits 0-5
+            }
+            else reg[reg_id] = 0xFF;
+            break;
+        case REG_OBPD:
+            /*
+            Bit 0-4   Red Intensity   ($00-1F)
+            Bit 5-9   Green Intensity ($00-1F)
+            Bit 10-14 Blue Intensity  ($00-1F)
+            */
+            if (cgb_mode) {
+                // Get the corresponding palette
+                u8 palette_index    = cgb_obj_pal_addr >> 3; // 2 bytes/color * 4 colors/palette
+                u8 color_index      = ((palette_index << 3) - cgb_obj_pal_addr) / 2; // the color index (out of 4) in this palette
+                u8 color_byte       = cgb_obj_pal_addr % 2;  // 0 = 5 red + 3 lower bits of green, 1 = 2 high bits of green + 5 blue + 1 unused bit
+                RGBColor* pal       = &pal_cgb[palette_index + 64][color_index];
+
+                if (lcd_mode != LCD_MODE_VRAM) {
+                    cram[cgb_obj_pal_addr] = value;
+                    if (color_byte == 0) {
+                        pal->red = (value >> 3) & 0x1F;                         // bit 0-4   red intensity
+                        pal->green = (pal->green & (~7)) | (value & 7);         // bit 5-7   lower 3 bits of green
+                    }
+                    else {
+                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   higher 2 bits of green
+                        pal->blue = (value >> 2) & 0x1F;                        // Bit 10-14 (2-6)   blue intensity
+                    }
+                }
+
+                // Auto increment on write
+                if (cgb_obj_pal_inc_flag) {
+                    cgb_obj_pal_addr = (cgb_obj_pal_addr + 1) & 0x3F;     // wrap around when above 64
+                    reg[REG_OBPI]   = (reg[REG_OBPI] & 0xC0) | cgb_obj_pal_addr;
+                }
+                reg[reg_id] = value;
+            }
+            else reg[reg_id] = 0xFF;
+            break;
+
         case REG_OPRI:
             if (cgb_mode)   reg[reg_id] = value;
             else            reg[reg_id] = 0xFF;
             break;
 
-        case REG_OBPD:
-            if (cgb_mode && lcd_mode != LCD_MODE_VRAM) {
-                reg[reg_id] = value;
-            }
-            else reg[reg_id] = 0xFF;
-            break;
 
         // Unused registers
         default:
@@ -310,7 +428,7 @@ void ppu_tick()
 
             // TODO figure out stat irq blocking
             // Dirty fix that mostly works for some reason
-            stat_irq_flag = 0;
+            //stat_irq_flag = 0;
 
             vram_accessible = 1;
             break;
@@ -424,13 +542,57 @@ void ppu_cleanup() {
 void update_palette(u8 reg, u8 value) {
     u8* palette;
     switch (reg) {
-        case REG_BGP:   palette = pal_bgp; break;
-        case REG_OBP0:  palette = pal_obp0; break;
-        case REG_OBP1:  palette = pal_obp1; break;
+        case REG_BGP:   palette = pal_bgp_index; break;
+        case REG_OBP0:  palette = pal_obp0_index; break;
+        case REG_OBP1:  palette = pal_obp1_index; break;
         default: return;
     }
     for (int i = 0; i < 4; i++) {
         palette[i] = (value >> (i * 2)) & 0x3;
+    }
+}
+
+void update_compatibility_palettes(u8 hash, RGBColor* bgp, RGBColor* obp0, RGBColor* obp1) {
+    u8 letter = read(ROM_TITLE + 3);
+    u8 tbi = -1; // color table index
+    u8 hl_pairs_size = sizeof(hash_letter_pairs) / sizeof(hash_letter_pairs[0]);
+    unsigned int (*table)[3][4];
+
+    // search the hash-letter pair and return its color table index
+    for (int i = 0; i < hl_pairs_size; i++) {
+        if ((hash_letter_pairs[i].hash == hash) 
+            && (letter == hash_letter_pairs[i].letter || hash_letter_pairs[i].letter == '\0')) {
+            tbi = hash_letter_pairs[i].tbi;
+            break;
+        }
+    }
+    // if not found
+    if (tbi == -1) return;
+
+    // lookup color table by index
+    table = &color_tables[tbi];
+
+    // update the palettes from color table
+
+    // Background palette
+    for (int i = 0; i < 4; i++) {
+        bgp[i].red     = ((*table)[0][i] >> 16) & 0xFF;
+        bgp[i].green   = ((*table)[0][i] >> 8) & 0xFF;
+        bgp[i].blue    = (*table)[0][i] & 0xFF;
+    }
+
+    // Object Palette 0
+    for (int i = 0; i < 4; i++) {
+        obp0[i].red     = ((*table)[1][i] >> 16) & 0xFF;
+        obp0[i].green   = ((*table)[1][i] >> 8) & 0xFF;
+        obp0[i].blue    = (*table)[1][i] & 0xFF;
+    }
+
+    // Object Palette 1
+    for (int i = 0; i < 4; i++) {
+        obp1[i].red     = ((*table)[2][i] >> 16) & 0xFF;
+        obp1[i].green   = ((*table)[2][i] >> 8) & 0xFF;
+        obp1[i].blue    = (*table)[2][i] & 0xFF;
     }
 }
 
@@ -711,7 +873,7 @@ void draw_tiles(u8 y) {
         pixel_pos = x + y_screen_width;
         if (!cgb_mode) {
             RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
-            RGBColor* col_new   = &colors_monochrome[pal_bgp[color_index]];
+            RGBColor* col_new   = &pal_bgp[pal_bgp_index[color_index]];
             if (!compare_rgb_colors(*col_lcd, *col_new)) {
                 col_lcd->red    = col_new->red;
                 col_lcd->green  = col_new->green;
@@ -766,7 +928,8 @@ void draw_objects(u8 y) {
         u16 pixel_pos;
         short ty; // the sprite line to draw
 
-        u8* palette;
+        u8* palette_index;
+        RGBColor* palette;
 
         // check if outside screen
         if (xpos >= 168 || xpos == 0) { continue; }
@@ -778,7 +941,8 @@ void draw_objects(u8 y) {
         palette_no  = GET_BIT(attr, OAM_PALLETE_DMG);
         flip_x      = GET_BIT(attr, OAM_X_FLIP);
         bg_over_obj = GET_BIT(attr, OAM_BG_OVER_OBJ);
-        palette = palette_no == 0 ? pal_obp0 : pal_obp1;
+        palette     = palette_no == 0 ? pal_obp0 : pal_obp1;
+        palette_index = palette_no == 0 ? pal_obp0_index : pal_obp1_index;
 
         // get pixel info
         pixel_offset = (tile_index * 16) + (ty * 2); // each tile takes 16 bytes (8x8x2BPP), each row of pixels is 2 bytes (2BPP)
@@ -803,7 +967,7 @@ void draw_objects(u8 y) {
 
             if (!cgb_mode) {
                 RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
-                RGBColor* col_new   = &colors_monochrome[palette[color_index]];
+                RGBColor* col_new   = &palette[palette_index[color_index]];
                 if (!compare_rgb_colors(*col_lcd, *col_new)) {
                     col_lcd->red    = col_new->red;
                     col_lcd->green  = col_new->green;

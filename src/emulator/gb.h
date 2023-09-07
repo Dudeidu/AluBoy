@@ -9,6 +9,7 @@
 u8  cgb_mode;
 u8  gb_frameskip; // only draw the screen when vblank_counter % gb_frameskip == 0
 u8  gb_debug_show_tracelog;
+u8  gb_cgb_compability_palette_flag;
 
 // Initialize emulator components
 int gb_init(u8* rom_buffer);

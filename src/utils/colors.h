@@ -11,4 +11,5 @@ typedef struct RGBColor {
     uint8_t blue;
 } RGBColor;
 
+
 #endif MY_COLORS

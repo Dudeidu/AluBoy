@@ -148,6 +148,7 @@
     <ClCompile Include="src\emulator\timer.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\emulator\cgb_palettes.h" />
     <ClInclude Include="src\framework\application.h" />
     <ClInclude Include="src\framework\audio.h" />
     <ClInclude Include="src\emulator\cpu.h" />

@@ -89,5 +89,8 @@
     <ClInclude Include="src\utils\colors.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\emulator\cgb_palettes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
