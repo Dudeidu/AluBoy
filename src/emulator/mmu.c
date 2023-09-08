@@ -75,8 +75,9 @@ int mmu_init(u8* rom_buffer) {
     printf("Title: %s\n", title);
 
     // CGB Indicator
-    cgb_flag = rom[ROM_CGB_FLAG] == 0x80;
-    cgb_mode = 0;
+    cgb_flag = rom[ROM_CGB_FLAG] == 0x80 || rom[ROM_CGB_FLAG] == 0xC0;
+    cgb_mode = cgb_flag;
+    //cgb_mode = 0;
     printf("CGB: %s\n", cgb_flag ? "true" : "false");
 
     // SGB Indicator

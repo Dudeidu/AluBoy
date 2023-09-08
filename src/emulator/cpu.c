@@ -57,6 +57,8 @@ u16 PC;             // Program Counter/Pointer
 
 // CPU specific memory
 u8  wram[8 * BANKSIZE_ROM];
+u8  wram_bank;
+
 u8  hram[0x80];
 
 u8  halted;
@@ -294,54 +296,108 @@ void test_bit(u8* a, u8 b, Flags* flags) {
 void cpu_powerup()
 {
     // Reset registers to their default values (DMG)
-    A = 0x01;
+    if (!cgb_mode) {
+        A = 0x01;
 
-    F.Z = 1;
-    F.N = 0;
-    if (checksum_header == 0)
-    {
-        F.H = 0;
-        F.C = 0;
+        F.Z = 1;
+        F.N = 0;
+        if (checksum_header == 0)
+        {
+            F.H = 0;
+            F.C = 0;
+        }
+        else {
+            F.H = 1;
+            F.C = 1;
+        }
+
+        BC.full = 0x0013;
+        DE.full = 0x00D8;
+        HL.full = 0x014D;
+        SP.full = 0xFFFE;
+        PC = 0x0100;
+
+        interrupts_enabled = 0;
+        ei_flag = 0;
+        halted = 0;
+
+        for (int i = 0; i <= 0xFF; i++) {
+            reg[i] = 0xFF;
+        }
+
+        reg[REG_P1] = 0xCF;
+        reg[REG_SB] = 0x00;
+        reg[REG_SC] = 0x7E;
+
+        reg[REG_IF] = 0xE1;
+
+        reg[REG_KEY1] = 0xFF;
+
+        reg[REG_VBK] = 0x0;
+        reg[REG_HDMA1] = 0xFF;
+        reg[REG_HDMA2] = 0xFF;
+        reg[REG_HDMA3] = 0xFF;
+        reg[REG_HDMA4] = 0xFF;
+        reg[REG_HDMA5] = 0xFF;
+
+        reg[REG_RP] = 0xFF;
+
+        reg[REG_SVBK] = 0x00;
+        wram_bank = 1;
+
+        reg[REG_IE] = 0x00;
     }
     else {
-        F.H = 1;
-        F.C = 1;
+        A = 0x11;
+
+        F.Z = 1;
+        F.N = 0;
+        if (checksum_header == 0)
+        {
+            F.H = 0;
+            F.C = 0;
+        }
+        else {
+            F.H = 1;
+            F.C = 1;
+        }
+
+        BC.full = 0x0000;
+        DE.full = 0xFF56;
+        HL.full = 0x000D;
+        SP.full = 0xFFFE;
+        PC = 0x0100;
+
+        interrupts_enabled = 0;
+        ei_flag = 0;
+        halted = 0;
+
+        for (int i = 0; i <= 0xFF; i++) {
+            reg[i] = 0xFF;
+        }
+
+        reg[REG_P1] = 0xCF;
+        reg[REG_SB] = 0x00;
+        reg[REG_SC] = 0x7E;
+
+        reg[REG_IF] = 0xE1;
+
+        reg[REG_KEY1] = 0xFF;
+
+        reg[REG_VBK] = 0x0;
+        reg[REG_HDMA1] = 0xFF;
+        reg[REG_HDMA2] = 0xFF;
+        reg[REG_HDMA3] = 0xFF;
+        reg[REG_HDMA4] = 0xFF;
+        reg[REG_HDMA5] = 0xFF;
+
+        reg[REG_RP] = 0xFF;
+
+        reg[REG_SVBK] = 0x00;
+        wram_bank = 1;
+
+        reg[REG_IE] = 0x00;
     }
-    
-    BC.full = 0x0013;
-    DE.full = 0x00D8;
-    HL.full = 0x014D;
-    SP.full = 0xFFFE;
-    PC = 0x0100;
-
-    interrupts_enabled = 0;
-    ei_flag = 0;
-    halted = 0;
-    
-    for (int i = 0; i <= 0xFF; i++) {
-        reg[i] = 0xFF;
-    }
-    
-    reg[REG_P1] = 0xCF;
-    reg[REG_SB] = 0x00;
-    reg[REG_SC] = 0x7E;
-
-    reg[REG_IF] = 0xE1;
-
-    reg[REG_KEY1] = 0xFF;
-    
-    reg[REG_VBK] = 0x0;
-    reg[REG_HDMA1] = 0xFF;
-    reg[REG_HDMA2] = 0xFF;
-    reg[REG_HDMA3] = 0xFF;
-    reg[REG_HDMA4] = 0xFF;
-    reg[REG_HDMA5] = 0xFF;
-
-    reg[REG_RP] = 0xFF;
-
-    reg[REG_SVBK] = 0x00;
-
-    reg[REG_IE] = 0x00;
     
 }
 int cpu_init()
@@ -393,8 +449,13 @@ void cpu_write_register(u8 reg_id, u8 value) {
             break;
         case REG_SVBK: 
             // (CGB) WRAM bank select 
-            if (cgb_mode)   reg[reg_id] = (reg[reg_id] & ~7) | (value & 7);
-            else            reg[reg_id] = 0xFF;
+            if (cgb_mode) {
+                reg[reg_id] = (reg[reg_id] & ~7) | (value & 7);
+                
+                if ((reg[reg_id] & 7) == 0) wram_bank = 1; // value of 0 selects bank 1
+                else wram_bank = (reg[reg_id] & 7);
+            }
+            else reg[reg_id] = 0xFF;
         // Unused registers
         default:
             reg[reg_id] = 0xFF;   // Convert to range 0-255
@@ -420,7 +481,7 @@ u8 cpu_read_memory(u16 addr) {
         case 0xF:
             // WRAM Bank / ECHO RAM
             if (addr < MEM_OAM) {
-                if (cgb_mode)   return wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)];
+                if (cgb_mode)   return wram[(addr & 0x1FFF) + (wram_bank * BANKSIZE_WRAM)];
                 else            return wram[addr & 0x1FFF];
             }
             // Object attribute memory (OAM)
@@ -474,7 +535,7 @@ void cpu_write_memory(u16 addr, u8 value) {
         case 0xF:
             // WRAM Bank / ECHO RAM
             if (addr < MEM_OAM) {
-                if (cgb_mode)   wram[(addr & 0x1FFF) + (reg[REG_SVBK] * BANKSIZE_WRAM)] = value;
+                if (cgb_mode)   wram[(addr & 0x1FFF) + (wram_bank * BANKSIZE_WRAM)] = value;
                 else            wram[addr & 0x1FFF] = value;
             }
             // Object attribute memory (OAM)

@@ -30,8 +30,8 @@ int     fps = 60;
 double  tick_rate; // Milliseconds per frame
 
 // shared variables
-const char* rom_file_name = "metroid ii";
-const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/games/";
+const char* rom_file_name = "cgb-acid2/cgb-acid2";
+const char* rom_file_path = "C:/dev/AluBoy/AluBoy/resources/roms/tests/";
 
 /* 
 int EventFilter(void* userdata, SDL_Event* event) {
@@ -48,7 +48,7 @@ int EventFilter(void* userdata, SDL_Event* event) {
 */
 
 int application_init(const char* title) {
-    const char* path_arr[] = { rom_file_path, rom_file_name, ".gb"};
+    const char* path_arr[] = { rom_file_path, rom_file_name, ".gbc"};
 
     char*   rom_path    = NULL;
     u8*     rom_buffer  = NULL;

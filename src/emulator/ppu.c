@@ -47,7 +47,7 @@ RGBColor pal_obp1[4] = {
     {47, 105, 87},     // dark
     {0, 0, 0},         // black
 };
-RGBColor pal_cgb[16][4]; // palettes 0-8 for BG, 9-15 for OBJ
+RGBColor pal_cgb[16][4]; // palettes 0-7 for BG, 8-15 for OBJ
 u8 cram[128];           // (cgb) color/palette RAM
 
 // Color and Palette data
@@ -63,6 +63,8 @@ u8  cgb_bg_pal_addr;    // copy of palette index (bits 0-5 of BGPI)
 
 u8  cgb_obj_pal_inc_flag; // whether to increment the palette index after writing to OBPD
 u8  cgb_obj_pal_addr;     // copy of palette index (bits 0-5 of OBPI)
+
+u8 cgb_object_priority_mode;
 
 u8 redraw_flag;         // when true screen will be redrawn at the end of the frame
 
@@ -97,7 +99,7 @@ void disable_lcd();
 void enable_lcd();
 u16  calculate_mode3_duration();
 inline void switch_lcd_mode(enum LCDMode);
-inline u8 compare_rgb_colors(RGBColor, RGBColor);
+inline u8 compare_rgb_colors(RGBColor, RGBColor, u8);
 void update_compatibility_palettes(u8 hash, RGBColor* bgp, RGBColor* obp0, RGBColor* obp1);
 
 // PUBLIC --------------------------------------------------
@@ -147,7 +149,7 @@ void ppu_powerup()
     reg[REG_LY] = 0x00;
     reg[REG_LYC] = 0x00;
 
-    reg[REG_DMA] = 0xFF;
+    reg[REG_DMA] = cgb_mode ? 0x00 : 0xFF;
     reg[REG_BGP] = 0xFC;
     reg[REG_OBP0] = 0xFF;
     reg[REG_OBP1] = 0xFF;
@@ -159,6 +161,9 @@ void ppu_powerup()
     reg[REG_BGPD] = 0xFF;
     reg[REG_OBPI] = 0xFF;
     reg[REG_OBPD] = 0xFF;
+
+    reg[REG_OPRI] = 0x00;
+    cgb_object_priority_mode = 0;
 
     // (cgb) Initialize the colors in the array
     memset(cram, 0, sizeof(cram));
@@ -256,15 +261,15 @@ void ppu_write_register(u8 reg_id, u8 value) {
             oam_dma_transfer_flag = 1;
             break;
         case REG_BGP:
-            update_palette(REG_BGP, value);
+            if (cgb_mode) update_palette(REG_BGP, value);
             reg[reg_id] = value;
             break;
         case REG_OBP0:
-            update_palette(REG_OBP0, value);
+            if (cgb_mode) update_palette(REG_OBP0, value);
             reg[reg_id] = value;
             break;
         case REG_OBP1:
-            update_palette(REG_OBP1, value);
+            if (cgb_mode) update_palette(REG_OBP1, value);
             reg[reg_id] = value;
             break;
         case REG_WY:
@@ -302,19 +307,19 @@ void ppu_write_register(u8 reg_id, u8 value) {
             if (cgb_mode) {
                 // Get the corresponding palette
                 u8 palette_index    = cgb_bg_pal_addr >> 3; // 2 bytes/color * 4 colors/palette
-                u8 color_index      = ((palette_index << 3) - cgb_bg_pal_addr) / 2; // the color index (out of 4) in this palette
+                u8 color_index      = (cgb_bg_pal_addr - (palette_index << 3)) / 2; // the color index (out of 4) in this palette
                 u8 color_byte       = cgb_bg_pal_addr % 2;  // 0 = 5 red + 3 lower bits of green, 1 = 2 high bits of green + 5 blue + 1 unused bit
                 RGBColor* pal       = &pal_cgb[palette_index][color_index];
 
                 if (lcd_mode != LCD_MODE_VRAM) {
                     cram[cgb_bg_pal_addr] = value;
                     if (color_byte == 0) {
-                        pal->red = (value >> 3) & 0x1F;                         // bit 0-4   red intensity
-                        pal->green = (pal->green & (~7)) | (value & 7);         // bit 5-7   lower 3 bits of green
+                        pal->red = value & 0x1F;                                // bit 0-4   red intensity
+                        pal->green = (pal->green & (~7)) | ((value >> 5));      // bit 5-7   low 3 bits of green
                     }
                     else {
-                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   higher 2 bits of green
                         pal->blue = (value >> 2) & 0x1F;                        // Bit 10-14 (2-6)   blue intensity
+                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   high 2 bits of green
                     }
                 }
 
@@ -343,27 +348,27 @@ void ppu_write_register(u8 reg_id, u8 value) {
             */
             if (cgb_mode) {
                 // Get the corresponding palette
-                u8 palette_index    = cgb_obj_pal_addr >> 3; // 2 bytes/color * 4 colors/palette
-                u8 color_index      = ((palette_index << 3) - cgb_obj_pal_addr) / 2; // the color index (out of 4) in this palette
+                u8 palette_index    = (cgb_obj_pal_addr >> 3); // 2 bytes/color * 4 colors/palette
+                u8 color_index      = (cgb_obj_pal_addr - (palette_index << 3)) / 2; // the color index (out of 4) in this palette
                 u8 color_byte       = cgb_obj_pal_addr % 2;  // 0 = 5 red + 3 lower bits of green, 1 = 2 high bits of green + 5 blue + 1 unused bit
-                RGBColor* pal       = &pal_cgb[palette_index + 64][color_index];
+                RGBColor* pal       = &pal_cgb[palette_index + 8][color_index];
 
                 if (lcd_mode != LCD_MODE_VRAM) {
-                    cram[cgb_obj_pal_addr] = value;
+                    cram[cgb_obj_pal_addr + 64] = value;
                     if (color_byte == 0) {
-                        pal->red = (value >> 3) & 0x1F;                         // bit 0-4   red intensity
-                        pal->green = (pal->green & (~7)) | (value & 7);         // bit 5-7   lower 3 bits of green
+                        pal->red = value & 0x1F;                                // bit 0-4   red intensity
+                        pal->green = (pal->green & (~7)) | ((value >> 5));      // bit 5-7   low 3 bits of green
                     }
                     else {
-                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   higher 2 bits of green
                         pal->blue = (value >> 2) & 0x1F;                        // Bit 10-14 (2-6)   blue intensity
+                        pal->green = (pal->green & (7)) | ((value & 3) << 3);   // bit 8-9   (0-1)   high 2 bits of green
                     }
                 }
 
                 // Auto increment on write
                 if (cgb_obj_pal_inc_flag) {
                     cgb_obj_pal_addr = (cgb_obj_pal_addr + 1) & 0x3F;     // wrap around when above 64
-                    reg[REG_OBPI]   = (reg[REG_OBPI] & 0xC0) | cgb_obj_pal_addr;
+                    reg[REG_OBPI] = (reg[REG_OBPI] & 0xC0) | cgb_obj_pal_addr;
                 }
                 reg[reg_id] = value;
             }
@@ -371,7 +376,10 @@ void ppu_write_register(u8 reg_id, u8 value) {
             break;
 
         case REG_OPRI:
-            if (cgb_mode)   reg[reg_id] = value;
+            if (cgb_mode) {
+                cgb_object_priority_mode = value | 0xFE;
+                reg[reg_id] = value | 0xFE;
+            }
             else            reg[reg_id] = 0xFF;
             break;
 
@@ -669,8 +677,15 @@ u16 calculate_mode3_duration() {
     return dur;
 }
 
-inline u8 compare_rgb_colors(RGBColor color1, RGBColor color2) {
-    return color1.red == color2.red && color1.green == color2.green && color1.blue == color2.blue;
+inline u8 compare_rgb_colors(RGBColor color1, RGBColor color2, u8 value_correction) {
+    if (value_correction) {
+        return color1.red == (((u16)color2.red * 255) / 31) 
+            && color1.green == (((u16)color2.green * 255) / 31) 
+            && color1.blue == (((u16)color2.blue * 255) / 31);
+
+    }
+    else
+        return color1.red == color2.red && color1.green == color2.green && color1.blue == color2.blue;
 }
 
 // Custom comparison function for sorting objects
@@ -685,6 +700,13 @@ int compare_object_by_priority(const void* a, const void* b) {
         // If the priority values are the same, sort by index
         return obj_b->index - obj_a->index;
     }
+}
+int compare_object_by_index(const void* a, const void* b) {
+    // Compare priorities for sorting
+    ObjectPriority *obj_a = (ObjectPriority *)a;
+    ObjectPriority *obj_b = (ObjectPriority *)b;
+    
+    return obj_b->index - obj_a->index;
 }
 
 // Request stat interrupt if source is enabled
@@ -739,7 +761,13 @@ u8 search_oam(u8 y) {
     }
     // sort the array based on the obj priority
     if (count > 0) {
-        qsort(objects, count, sizeof(ObjectPriority), compare_object_by_priority);
+        int (*compare_function) (const void*, const void*); // function pointer
+        if (cgb_mode)
+            compare_function = cgb_object_priority_mode ? compare_object_by_priority : compare_object_by_index;
+        else 
+            compare_function = compare_object_by_priority;
+
+        qsort(objects, count, sizeof(ObjectPriority), compare_function);
     }
     return count;
 }
@@ -752,7 +780,7 @@ inline void switch_lcd_mode(enum LCDMode mode) {
 void draw_scanline(u8 y) {
     if (debug_show_line_data) printf("line:%03d bg?:%d obj?:%d ", y, GET_BIT( reg[REG_LCDC], LCDC_BGW_ENABLE), GET_BIT(reg[REG_LCDC], LCDC_OBJ_ENABLE));
     
-    if (GET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE)) {
+    if (cgb_mode || GET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE)) {
         draw_tiles(y);
     }
     else {
@@ -794,6 +822,15 @@ void draw_tiles(u8 y) {
 
     u8  color_index;
     u16 td_addr, pixel_offset;
+    RGBColor* palette = pal_bgp;
+
+    // cgb
+    u8  bgm_attr = 0; // BG map attributes
+    u8  bg_to_oam_priority = 0;
+    u8  flip_y = 0;
+    u8  flip_x = 0;
+    u8  tile_vram_bank = 0;
+    u8  bg_palette_no = 0;
 
     // debug
     u8 bg_pixels = 0;
@@ -861,36 +898,60 @@ void draw_tiles(u8 y) {
             // (0-127 are in block 2, -128 to -1 are in block 1)
             td_addr = (td_area_flag ? 0x8000 : 0x9000) + (tile_index * 16);
 
-            // Get pixel info
-            pixel_offset = td_addr + (row * 2) - vram_offset;
-            byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
-            byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+            // Get background attributes
+            if (!cgb_mode) {
+                // Get pixel info
+                pixel_offset = td_addr + (row * 2) - vram_offset;
+                byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
+                byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+            }
+            else {
+                bgm_attr            = vram[tm_addr - vram_offset + BANKSIZE_VRAM];
+                bg_palette_no       = bgm_attr & 7;
+                tile_vram_bank      = GET_BIT(bgm_attr, 3);
+                flip_x              = GET_BIT(bgm_attr, 5);
+                flip_y              = GET_BIT(bgm_attr, 6);
+                bg_to_oam_priority  = GET_BIT(bgm_attr, 7);
+                
+                // Get pixel info
+                pixel_offset = td_addr + ((flip_y ? (7 - row) : row) * 2) - vram_offset;
+                pixel_offset += tile_vram_bank * BANKSIZE_VRAM;
+                byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
+                byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+
+                // get cgb background palette
+                palette = pal_cgb[bg_palette_no];
+            }
+
         }
         // get color of pixel using the 2BPP method
-        color_index = (GET_BIT(byte2, 7 - col) << 1) | GET_BIT(byte1, 7 - col);
+        color_index = (GET_BIT(byte2, (flip_x ? col : (7 - col))) << 1) | GET_BIT(byte1, (flip_x ? col : (7 - col)));
 
         // Update pixel color
         pixel_pos = x + y_screen_width;
-        if (!cgb_mode) {
-            RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
-            RGBColor* col_new   = &pal_bgp[pal_bgp_index[color_index]];
-            if (!compare_rgb_colors(*col_lcd, *col_new)) {
-                col_lcd->red    = col_new->red;
-                col_lcd->green  = col_new->green;
-                col_lcd->blue   = col_new->blue;
 
-                lcd_index_buffer[pixel_pos] = color_index;
-
-                // Tell screen to redraw at the next step
-                if (!redraw_flag) redraw_flag = 1;
-
-                //pixels_updates++;
+        RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
+        RGBColor* col_new   = &palette[cgb_mode ? color_index : pal_bgp_index[color_index]];
+        if (!compare_rgb_colors(*col_lcd, *col_new, cgb_mode)) {
+            if (cgb_mode) {
+                col_lcd->red = ((u16)col_new->red * 255) / 31;
+                col_lcd->green = ((u16)col_new->green * 255) / 31;
+                col_lcd->blue = ((u16)col_new->blue * 255) / 31;
             }
-        }
-        else {
+            else {
+                col_lcd->red = col_new->red;
+                col_lcd->green = col_new->green;
+                col_lcd->blue = col_new->blue;
+            }
 
+            lcd_index_buffer[pixel_pos] = color_index + (bg_to_oam_priority * 4);
+
+            // Tell screen to redraw at the next step
+            if (!redraw_flag) redraw_flag = 1;
+
+            //pixels_updates++;
         }
-        
+
         /*
         if (y == 60) {
             printf("ti: %d, tm: %d, bg: %d, win: %d, pixels: %d\n",
@@ -921,6 +982,7 @@ void draw_objects(u8 y) {
         u8 tile_index   = obj_height == 16 ? (oam[index + 2] & 0xFE) : oam[index + 2];
         u8 attr         = oam[index + 3];
         u8 palette_no, flip_x, flip_y, bg_over_obj;
+        u8 tile_vram_bank = 0;
 
         u8 byte1, byte2;
         u8 color_index;
@@ -938,16 +1000,32 @@ void draw_objects(u8 y) {
         flip_y = GET_BIT(attr, OAM_Y_FLIP);
         if (flip_y) ty = (obj_height - ty) - 1;
 
-        palette_no  = GET_BIT(attr, OAM_PALLETE_DMG);
+        
         flip_x      = GET_BIT(attr, OAM_X_FLIP);
         bg_over_obj = GET_BIT(attr, OAM_BG_OVER_OBJ);
-        palette     = palette_no == 0 ? pal_obp0 : pal_obp1;
-        palette_index = palette_no == 0 ? pal_obp0_index : pal_obp1_index;
+        
+        // get palette and pixel info
+        // each tile takes 16 bytes (8x8x2BPP), each row of pixels is 2 bytes (2BPP)
+        if (!cgb_mode) {
+            palette_no  = GET_BIT(attr, OAM_PALLETE_DMG);
+            palette = palette_no == 0 ? pal_obp0 : pal_obp1;
+            palette_index = palette_no == 0 ? pal_obp0_index : pal_obp1_index;
 
-        // get pixel info
-        pixel_offset = (tile_index * 16) + (ty * 2); // each tile takes 16 bytes (8x8x2BPP), each row of pixels is 2 bytes (2BPP)
+            pixel_offset = (tile_index * 16) + (ty * 2); 
+        }
+        else {
+            palette_no = attr & 7; // bits 0-2
+            palette = pal_cgb[palette_no + 8];
+            palette_index = pal_obp0_index; // unused
+
+            tile_vram_bank = GET_BIT(attr, OAM_VRAM_BANK_CGB);
+            pixel_offset = (tile_index * 16) + (ty * 2) + (tile_vram_bank * BANKSIZE_VRAM); 
+        }
+        
+
         byte1 = vram[pixel_offset];      // represents lsb of the color_index of each pixel
         byte2 = vram[pixel_offset + 1];  // represents msb of the color_index of each pixel
+
 
         for (s8 x = 7; x >= 0; x--) {
             u8 px = (xpos - 8) + (flip_x ? x : (7 - x)); // Horizontal flip
@@ -963,15 +1041,31 @@ void draw_objects(u8 y) {
             pixel_pos = px + y_screen_width;
 
             // BG and Window colors 1-3 over the OBJ
-            if (bg_over_obj && lcd_index_buffer[pixel_pos] != 0) continue;
-
-            if (!cgb_mode) {
-                RGBColor* col_lcd   = &lcd_pixels[pixel_pos];
-                RGBColor* col_new   = &palette[palette_index[color_index]];
-                if (!compare_rgb_colors(*col_lcd, *col_new)) {
-                    col_lcd->red    = col_new->red;
-                    col_lcd->green  = col_new->green;
-                    col_lcd->blue   = col_new->blue;
+            //if (bg_over_obj && lcd_index_buffer[pixel_pos] != 0) continue;
+            /*
+            If the BG color index is 0, the OBJ will always have priority;
+            Otherwise, if LCDC bit 0 is clear, the OBJ will always have priority;
+            Otherwise, if both the BG Attributes and the OAM Attributes have bit 7 clear, the OBJ will have priority;
+            Otherwise, BG will have priority.
+            */
+            
+            if ((lcd_index_buffer[pixel_pos] % 4) == 0 ||
+                !GET_BIT(reg[REG_LCDC], LCDC_BGW_ENABLE) ||
+                (!bg_over_obj && lcd_index_buffer[pixel_pos] < 4))
+            {
+                RGBColor* col_lcd = &lcd_pixels[pixel_pos];
+                RGBColor* col_new = &palette[cgb_mode ? color_index : palette_index[color_index]];
+                if (!compare_rgb_colors(*col_lcd, *col_new, cgb_mode)) {
+                    if (cgb_mode) {
+                        col_lcd->red = ((u16)col_new->red * 255) / 31;
+                        col_lcd->green = ((u16)col_new->green * 255) / 31;
+                        col_lcd->blue = ((u16)col_new->blue * 255) / 31;
+                    }
+                    else {
+                        col_lcd->red = col_new->red;
+                        col_lcd->green = col_new->green;
+                        col_lcd->blue = col_new->blue;
+                    }
 
                     lcd_index_buffer[pixel_pos] = color_index;
 
@@ -979,10 +1073,6 @@ void draw_objects(u8 y) {
                     if (!redraw_flag) redraw_flag = 1;
                 }
             }
-            else {
-
-            }
         }
-
     }
 }
